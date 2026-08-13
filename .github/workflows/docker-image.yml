@@ -2,9 +2,9 @@ name: Build, push, and deploy Harness
 
 on:
   workflow_dispatch:
-  # One-shot connector fallback; only the exact deployment issue below may run jobs.
-  issues:
-    types: [opened]
+  # One-shot connector fallback; only the exact merged PR marker below may run jobs.
+  pull_request_target:
+    types: [edited]
   push:
     branches:
       - master
@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   image:
-    if: github.event_name != 'issues' || github.event.issue.title == 'Deploy Harness: 9fc45d9'
+    if: github.event_name != 'pull_request_target' || (github.event.pull_request.number == 2 && contains(github.event.pull_request.title, '[deploy-9fc45d9]'))
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
