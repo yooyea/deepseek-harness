@@ -65,12 +65,23 @@ jobs:
             -H "Host: $trusted_host:$port" \
             -H "Origin: http://$trusted_host:$port" \
             "http://127.0.0.1:$port/api/dynamicCordisRunner/inventory")"
+          public_no_origin_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --user "$user:$DSH_ACCESS_PASSWORD" \
+            -H "Host: $trusted_host:$port" \
+            "http://127.0.0.1:$port/api/dynamicCordisRunner/inventory")"
+          public_no_port_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --user "$user:$DSH_ACCESS_PASSWORD" \
+            -H "Host: $trusted_host" \
+            -H "Origin: http://$trusted_host" \
+            "http://127.0.0.1:$port/api/dynamicCordisRunner/inventory")"
           loopback_status="$(curl -sS -o /dev/null -w '%{http_code}' \
             --user "$user:$DSH_ACCESS_PASSWORD" \
             -H "Host: 127.0.0.1:$port" \
             "http://127.0.0.1:$port/api/dynamicCordisRunner/inventory")"
 
           echo "public_host_status=$public_status"
+          echo "public_no_origin_status=$public_no_origin_status"
+          echo "public_no_port_status=$public_no_port_status"
           echo "loopback_host_status=$loopback_status"
           echo "expected_status=404"
           REMOTE
