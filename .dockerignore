@@ -1,0 +1,15 @@
+.git
+.github
+node_modules
+**/node_modules
+**/lib
+**/dist
+**/.vite
+.pnpm-store
+.pnpm-cache
+.node-gyp
+.node-headers
+.dsh-home
+.dsh-verify
+coverage
+*.log
