@@ -1,0 +1,9 @@
+:8080 {
+  basic_auth {
+    {$DSH_ACCESS_USER} {$DSH_ACCESS_HASH}
+  }
+
+  reverse_proxy 127.0.0.1:3080 {
+    header_up Host 127.0.0.1:3080
+  }
+}
