@@ -1,0 +1,76 @@
+name: Diagnose Harness deployment
+
+on:
+  push:
+    branches:
+      - agent/docker-image
+    paths:
+      - .github/workflows/deployment-diagnose.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_NAME: ${{ secrets.SERVER_NAME }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
+    steps:
+      - name: Install SSH password client
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Inspect effective deployment
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          if [[ ! "$SERVER_IP" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+            echo "SERVER_IP is not a valid host authority." >&2
+            exit 1
+          fi
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" \
+            "bash -s -- '$SERVER_IP'" <<'REMOTE'
+          set -euo pipefail
+          trusted_host="$1"
+          cd "$HOME/deepseek-harness"
+
+          if docker info >/dev/null 2>&1; then
+            docker_cmd=(docker)
+          else
+            docker_cmd=(sudo -n docker)
+          fi
+
+          echo "compose_env:"
+          grep -E '^(HARNESS_PORT|DSH_TRUSTED_HOST)=' .env || true
+
+          echo "container_env:"
+          "${docker_cmd[@]}" inspect deepseek-harness \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | grep -E '^(DSH_TRUSTED_HOST|DSH_ACCESS_USER)=' || true
+
+          echo "node_command:"
+          "${docker_cmd[@]}" exec deepseek-harness bash -lc \
+            'for p in /proc/[0-9]*/cmdline; do line="$(tr "\0" " " < "$p" 2>/dev/null || true)"; case "$line" in *apps/cli/lib/bin.js*) printf "%s\n" "$line";; esac; done'
+
+          set -a
+          source .env
+          set +a
+          port="${HARNESS_PORT:-8080}"
+          user="${DSH_ACCESS_USER:-admin}"
+
+          public_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --user "$user:$DSH_ACCESS_PASSWORD" \
+            -H "Host: $trusted_host:$port" \
+            -H "Origin: http://$trusted_host:$port" \
+            "http://127.0.0.1:$port/api/dynamicCordisRunner/inventory")"
+          loopback_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --user "$user:$DSH_ACCESS_PASSWORD" \
+            -H "Host: 127.0.0.1:$port" \
+            "http://127.0.0.1:$port/api/dynamicCordisRunner/inventory")"
+
+          echo "public_host_status=$public_status"
+          echo "loopback_host_status=$loopback_status"
+          echo "expected_status=404"
+          REMOTE
