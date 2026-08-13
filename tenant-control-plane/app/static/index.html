@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepHarness 租户控制台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <p class="eyebrow">CONTROL PLANE</p>
+          <h1>DeepHarness 租户控制台</h1>
+          <p class="subtitle">独立实例、资源准入与运行状态</p>
+        </div>
+        <div id="capacity-badge" class="badge neutral">正在读取容量</div>
+      </header>
+
+      <section id="metrics" class="metrics"></section>
+
+      <section class="panel create-panel">
+        <div>
+          <h2>创建新租户</h2>
+          <p>系统将自动分配端口、容器和独立数据卷。</p>
+        </div>
+        <form id="create-form">
+          <label>租户名称<input name="name" required maxlength="80" placeholder="例如 Morgan Team" /></label>
+          <label>租户标识<input name="slug" required minlength="3" maxlength="32" pattern="[a-z][a-z0-9-]{1,30}[a-z0-9]" placeholder="morgan" /></label>
+          <label>登录用户名<input name="access_username" required value="admin" maxlength="64" /></label>
+          <button type="submit">创建实例</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <div><h2>租户实例</h2><p id="tenant-summary">正在加载</p></div>
+          <button id="refresh" class="secondary">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>租户</th><th>状态</th><th>访问地址</th><th>资源配额</th><th>实时占用</th><th>操作</th></tr></thead>
+            <tbody id="tenants"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-title"><div><h2>最近操作</h2><p>租户生命周期审计记录</p></div></div>
+        <div id="logs" class="logs"></div>
+      </section>
+    </main>
+
+    <dialog id="secret-dialog">
+      <div class="dialog-body">
+        <p class="eyebrow">实例已创建</p>
+        <h2>请立即保存初始密码</h2>
+        <p>控制台不会保存或再次展示这个密码。</p>
+        <div class="secret-row"><code id="initial-password"></code><button id="copy-password" class="secondary">复制</button></div>
+        <a id="tenant-link" class="button-link" target="_blank" rel="noopener">打开 Harness</a>
+        <button id="close-dialog" class="secondary full">我已保存</button>
+      </div>
+    </dialog>
+
+    <div id="toast" role="status"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

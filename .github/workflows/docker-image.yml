@@ -18,6 +18,7 @@ on:
       - apps/**
       # Includes deployment-owned client plugins such as DeepHarness branding.
       - packages/**
+      - tenant-control-plane/**
       - vendor/**
 
 permissions:
@@ -59,6 +60,20 @@ jobs:
             crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push tenant control plane
+        uses: docker/build-push-action@v6
+        with:
+          context: tenant-control-plane
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:control-plane-latest
+            crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:control-plane-sha-${{ github.sha }}
+          cache-from: type=gha,scope=tenant-control-plane
+          cache-to: type=gha,mode=max,scope=tenant-control-plane
 
   deploy:
     needs: image
@@ -126,25 +141,60 @@ jobs:
             else
               access_password="$(head -c 24 /dev/urandom | base64 | tr -d '\n')"
             fi
+            control_plane_password="$access_password"
             {
               echo 'HARNESS_PORT=8080'
               echo 'HARNESS_IMAGE_TAG=latest'
               echo 'DSH_ACCESS_USER=admin'
               printf 'DSH_ACCESS_PASSWORD=%s\n' "$access_password"
               printf 'DSH_TRUSTED_HOST=%s\n' "$trusted_host"
+              echo 'CONTROL_PLANE_PORT=8090'
+              echo 'CONTROL_PLANE_IMAGE_TAG=control-plane-latest'
+              echo 'CONTROL_PLANE_ADMIN_USER=admin'
+              printf 'CONTROL_PLANE_ADMIN_PASSWORD=%s\n' "$control_plane_password"
+              printf 'CONTROL_PLANE_PUBLIC_HOST=%s\n' "$trusted_host"
+              echo 'TENANT_PUBLIC_SCHEME=http'
+              echo 'TENANT_PORT_START=8100'
+              echo 'TENANT_PORT_END=8199'
             } > .env
-          elif grep -q '^DSH_TRUSTED_HOST=' .env; then
-            sed -i "s/^DSH_TRUSTED_HOST=.*/DSH_TRUSTED_HOST=$trusted_host/" .env
           else
-            printf 'DSH_TRUSTED_HOST=%s\n' "$trusted_host" >> .env
+            if grep -q '^DSH_TRUSTED_HOST=' .env; then
+              sed -i "s/^DSH_TRUSTED_HOST=.*/DSH_TRUSTED_HOST=$trusted_host/" .env
+            else
+              printf 'DSH_TRUSTED_HOST=%s\n' "$trusted_host" >> .env
+            fi
+            if grep -q '^CONTROL_PLANE_PUBLIC_HOST=' .env; then
+              sed -i "s/^CONTROL_PLANE_PUBLIC_HOST=.*/CONTROL_PLANE_PUBLIC_HOST=$trusted_host/" .env
+            else
+              printf 'CONTROL_PLANE_PUBLIC_HOST=%s\n' "$trusted_host" >> .env
+            fi
+            if ! grep -q '^CONTROL_PLANE_ADMIN_PASSWORD=' .env; then
+              control_plane_password="$(sed -n 's/^DSH_ACCESS_PASSWORD=//p' .env | head -1)"
+              if [[ -z "$control_plane_password" ]]; then
+                if command -v openssl >/dev/null 2>&1; then
+                  control_plane_password="$(openssl rand -hex 24)"
+                else
+                  control_plane_password="$(head -c 24 /dev/urandom | base64 | tr -d '\n')"
+                fi
+              fi
+              {
+                echo 'CONTROL_PLANE_PORT=8090'
+                echo 'CONTROL_PLANE_IMAGE_TAG=control-plane-latest'
+                echo 'CONTROL_PLANE_ADMIN_USER=admin'
+                printf 'CONTROL_PLANE_ADMIN_PASSWORD=%s\n' "$control_plane_password"
+                echo 'TENANT_PUBLIC_SCHEME=http'
+                echo 'TENANT_PORT_START=8100'
+                echo 'TENANT_PORT_END=8199'
+              } >> .env
+            fi
           fi
 
           if docker info >/dev/null 2>&1; then
-            docker compose pull harness
+            docker compose pull harness tenant-control-plane
             docker compose up -d --remove-orphans
             docker compose ps
           else
-            sudo -n docker compose pull harness
+            sudo -n docker compose pull harness tenant-control-plane
             sudo -n docker compose up -d --remove-orphans
             sudo -n docker compose ps
           fi
