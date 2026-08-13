@@ -1,0 +1,45 @@
+name: Verify HTTP UUID compatibility
+
+on:
+  push:
+    branches:
+      - agent/docker-image
+    paths:
+      - .github/workflows/verify-http-uuid.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_NAME: ${{ secrets.SERVER_NAME }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
+    steps:
+      - name: Install SSH password client
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Verify running container assets
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            docker_cmd=(docker)
+          else
+            docker_cmd=(sudo -n docker)
+          fi
+
+          index="$("${docker_cmd[@]}" exec deepseek-harness cat /opt/dsh/apps/web/dist/index.html)"
+          first_script="$(printf '%s' "$index" | grep -o '<script[^>]*' | head -n 1)"
+          printf 'first_script=%s\n' "$first_script"
+          test "$first_script" = '<script src="/http-random-uuid-polyfill.js"'
+
+          "${docker_cmd[@]}" exec deepseek-harness test -s /opt/dsh/apps/web/dist/http-random-uuid-polyfill.js
+          "${docker_cmd[@]}" exec deepseek-harness node --check /opt/dsh/apps/web/dist/http-random-uuid-polyfill.js
+          echo 'uuid_polyfill_verified=true'
+          REMOTE
