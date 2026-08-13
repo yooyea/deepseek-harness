@@ -192,6 +192,12 @@
     - id: ui-settings-models
       name: '@deepseek-ai/dsh-client-ui-settings-models'
 
+    # Deployment-owned product chrome. This shadows the upstream branded
+    # onboarding cells and projects DeepHarness assets without editing the
+    # packages that own the underlying settings and conversation surfaces.
+    - id: ui-brand-deepharness
+      name: '@deepseek-ai/dsh-client-ui-brand-deepharness'
+
     - id: ui-settings-plugin-inventory
       name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
 
