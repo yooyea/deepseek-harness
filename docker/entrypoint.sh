@@ -12,7 +12,12 @@ DSH_ACCESS_HASH="$(caddy hash-password --plaintext "$DSH_ACCESS_PASSWORD")"
 
 mkdir -p "$DSH_HOME"
 
-node /opt/dsh/apps/cli/lib/bin.js web --host 127.0.0.1 --port 3080 &
+dsh_args=(web --host 127.0.0.1 --port 3080)
+if [[ -n "${DSH_TRUSTED_HOST:-}" ]]; then
+  dsh_args+=(--trusted-host "$DSH_TRUSTED_HOST")
+fi
+
+node /opt/dsh/apps/cli/lib/bin.js "${dsh_args[@]}" &
 dsh_pid=$!
 
 caddy run --config /opt/dsh/docker/Caddyfile --adapter caddyfile &
