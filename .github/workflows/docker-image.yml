@@ -1,4 +1,4 @@
-name: Build and push Harness image
+name: Build, push, and deploy Harness
 
 on:
   workflow_dispatch:
@@ -9,6 +9,8 @@ on:
       - Dockerfile
       - .dockerignore
       - docker/**
+      - docker-compose.yml
+      - .env.example
       - .github/workflows/docker-image.yml
       - package.json
       - pnpm-lock.yaml
@@ -55,3 +57,82 @@ jobs:
             crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_NAME: ${{ secrets.SERVER_NAME }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
+      REGISTRY_PASSWORD: ${{ secrets.DOCKER_PWD }}
+    steps:
+      - name: Check out deployment files
+        uses: actions/checkout@v4
+
+      - name: Install SSH password client
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Prepare deployment directory
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" \
+            'mkdir -p "$HOME/deepseek-harness"'
+
+      - name: Upload Docker Compose definition
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e scp -o StrictHostKeyChecking=accept-new docker-compose.yml \
+            "$SERVER_NAME@$SERVER_IP:deepseek-harness/docker-compose.yml"
+
+      - name: Log server in to the image registry
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          printf '%s' "$REGISTRY_PASSWORD" | sshpass -e ssh \
+            -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" \
+            'if docker info >/dev/null 2>&1; then
+               docker login --username nick1986924905 --password-stdin crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com;
+             elif sudo -n docker info >/dev/null 2>&1; then
+               sudo -n docker login --username nick1986924905 --password-stdin crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com;
+             else
+               echo "Docker is unavailable or requires interactive sudo." >&2;
+               exit 1;
+             fi'
+
+      - name: Pull and restart Harness
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/deepseek-harness"
+          umask 077
+
+          if [[ ! -f .env ]]; then
+            if command -v openssl >/dev/null 2>&1; then
+              access_password="$(openssl rand -hex 24)"
+            else
+              access_password="$(head -c 24 /dev/urandom | base64 | tr -d '\n')"
+            fi
+            {
+              echo 'HARNESS_PORT=8080'
+              echo 'HARNESS_IMAGE_TAG=latest'
+              echo 'DSH_ACCESS_USER=admin'
+              printf 'DSH_ACCESS_PASSWORD=%s\n' "$access_password"
+            } > .env
+          fi
+
+          if docker info >/dev/null 2>&1; then
+            docker compose pull harness
+            docker compose up -d --remove-orphans
+            docker compose ps
+          else
+            sudo -n docker compose pull harness
+            sudo -n docker compose up -d --remove-orphans
+            sudo -n docker compose ps
+          fi
+          REMOTE
