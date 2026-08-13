@@ -36,8 +36,13 @@ describe('DeepHarness branding projection', () => {
 
   it('completes a shadowed onboarding step once', () => {
     const complete = vi.fn()
-    const { rerender } = render(<SkipOnboarding stepId="welcome-notice" complete={complete} openSection={vi.fn()} />)
-    rerender(<SkipOnboarding stepId="welcome-notice" complete={complete} openSection={vi.fn()} />)
+    const unusedHook = (() => { throw new Error('unused by SkipOnboarding') }) as never
+    const props = {
+      stepId: 'welcome-notice', complete, openSection: vi.fn(),
+      useSessions: unusedHook, useWorkspaces: unusedHook,
+    }
+    const { rerender } = render(<SkipOnboarding {...props} />)
+    rerender(<SkipOnboarding {...props} />)
     expect(complete).toHaveBeenCalledTimes(1)
   })
 })
