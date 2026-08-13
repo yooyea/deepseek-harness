@@ -8,6 +8,7 @@ services:
     environment:
       DSH_ACCESS_USER: "${DSH_ACCESS_USER:-admin}"
       DSH_ACCESS_PASSWORD: "${DSH_ACCESS_PASSWORD:?Set DSH_ACCESS_PASSWORD in .env}"
+      DSH_TRUSTED_HOST: "${DSH_TRUSTED_HOST:-}"
     volumes:
       - harness-data:/data
 
