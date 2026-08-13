@@ -16,6 +16,7 @@ on:
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
       - apps/**
+      # Includes deployment-owned client plugins such as DeepHarness branding.
       - packages/**
       - vendor/**
 
