@@ -9,6 +9,8 @@ WORKDIR /opt/dsh
 COPY . .
 RUN pnpm install --frozen-lockfile
 RUN pnpm run build
+RUN cp docker/http-random-uuid-polyfill.js apps/web/dist/http-random-uuid-polyfill.js \
+    && node --input-type=module -e "import { readFileSync, writeFileSync } from 'node:fs'; const path = 'apps/web/dist/index.html'; const html = readFileSync(path, 'utf8'); const marker = '<head>'; if (!html.includes(marker)) throw new Error('web index is missing its head element'); writeFileSync(path, html.replace(marker, marker + '<script src=\"/http-random-uuid-polyfill.js\"></script>'))"
 
 FROM node:24-bookworm-slim AS runtime
 
