@@ -107,8 +107,14 @@ jobs:
         env:
           SSHPASS: ${{ env.SERVER_PASSWORD }}
         run: |
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
+          if [[ ! "$SERVER_IP" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+            echo "SERVER_IP is not a valid host authority." >&2
+            exit 1
+          fi
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" \
+            "bash -s -- '$SERVER_IP'" <<'REMOTE'
           set -euo pipefail
+          trusted_host="$1"
           cd "$HOME/deepseek-harness"
           umask 077
 
@@ -123,7 +129,12 @@ jobs:
               echo 'HARNESS_IMAGE_TAG=latest'
               echo 'DSH_ACCESS_USER=admin'
               printf 'DSH_ACCESS_PASSWORD=%s\n' "$access_password"
+              printf 'DSH_TRUSTED_HOST=%s\n' "$trusted_host"
             } > .env
+          elif grep -q '^DSH_TRUSTED_HOST=' .env; then
+            sed -i "s/^DSH_TRUSTED_HOST=.*/DSH_TRUSTED_HOST=$trusted_host/" .env
+          else
+            printf 'DSH_TRUSTED_HOST=%s\n' "$trusted_host" >> .env
           fi
 
           if docker info >/dev/null 2>&1; then
