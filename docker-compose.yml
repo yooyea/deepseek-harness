@@ -1,0 +1,16 @@
+services:
+  harness:
+    image: crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:${HARNESS_IMAGE_TAG:-latest}
+    container_name: deepseek-harness
+    restart: unless-stopped
+    ports:
+      - "${HARNESS_PORT:-8080}:8080"
+    environment:
+      DSH_ACCESS_USER: "${DSH_ACCESS_USER:-admin}"
+      DSH_ACCESS_PASSWORD: "${DSH_ACCESS_PASSWORD:?Set DSH_ACCESS_PASSWORD in .env}"
+    volumes:
+      - harness-data:/data
+
+volumes:
+  harness-data:
+    name: deepseek-harness-data
