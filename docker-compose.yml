@@ -12,6 +12,42 @@ services:
     volumes:
       - harness-data:/data
 
+  tenant-control-plane:
+    image: crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:${CONTROL_PLANE_IMAGE_TAG:-control-plane-latest}
+    container_name: deepharness-control-plane
+    restart: unless-stopped
+    ports:
+      - "${CONTROL_PLANE_PORT:-8090}:8090"
+    environment:
+      CONTROL_PLANE_DB: /data/control-plane.db
+      CONTROL_PLANE_ADMIN_USER: "${CONTROL_PLANE_ADMIN_USER:-admin}"
+      CONTROL_PLANE_ADMIN_PASSWORD: "${CONTROL_PLANE_ADMIN_PASSWORD:?Set CONTROL_PLANE_ADMIN_PASSWORD in .env}"
+      CONTROL_PLANE_PUBLIC_HOST: "${CONTROL_PLANE_PUBLIC_HOST:-127.0.0.1}"
+      TENANT_PUBLIC_SCHEME: "${TENANT_PUBLIC_SCHEME:-http}"
+      TENANT_HARNESS_IMAGE: "crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:${HARNESS_IMAGE_TAG:-latest}"
+      TENANT_PORT_START: "${TENANT_PORT_START:-8100}"
+      TENANT_PORT_END: "${TENANT_PORT_END:-8199}"
+      TENANT_DEFAULT_CPU: "${TENANT_DEFAULT_CPU:-1}"
+      TENANT_DEFAULT_MEMORY_MB: "${TENANT_DEFAULT_MEMORY_MB:-1536}"
+      CAPACITY_MAX_CPU_PERCENT: "${CAPACITY_MAX_CPU_PERCENT:-70}"
+      CAPACITY_MAX_LOAD_RATIO: "${CAPACITY_MAX_LOAD_RATIO:-0.9}"
+      CAPACITY_MIN_FREE_MEMORY_MB: "${CAPACITY_MIN_FREE_MEMORY_MB:-2048}"
+      CAPACITY_MIN_FREE_DISK_PERCENT: "${CAPACITY_MIN_FREE_DISK_PERCENT:-15}"
+      CAPACITY_CPU_RESERVATION_RATIO: "${CAPACITY_CPU_RESERVATION_RATIO:-0.8}"
+    volumes:
+      - control-plane-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   harness-data:
     name: deepseek-harness-data
+  control-plane-data:
+    name: deepharness-control-plane-data
