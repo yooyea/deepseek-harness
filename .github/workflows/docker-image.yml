@@ -1,5 +1,5 @@
 name: Build, push, and deploy Harness
-# One-shot deployment request for DeepHarness 9fc45d9.
+# One-shot deployment request for DeepHarness 9fc45d9 (retry after lockfile repair).
 
 on:
   workflow_dispatch:
