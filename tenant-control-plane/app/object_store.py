@@ -55,11 +55,19 @@ class ObjectStore:
         """Create an encrypted short-lived upload request after validating the checksum claim."""
         if len(sha256) != 64:
             raise ObjectStoreError("plugin artifact checksum must be SHA-256")
-        headers = {"x-amz-server-side-encryption": "AES256"}
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "x-amz-server-side-encryption": "AES256",
+        }
         return {
             "url": self.client.generate_presigned_url(
                 "put_object",
-                Params={"Bucket": self.bucket, "Key": key, "ServerSideEncryption": "AES256"},
+                Params={
+                    "Bucket": self.bucket,
+                    "Key": key,
+                    "ContentType": "application/octet-stream",
+                    "ServerSideEncryption": "AES256",
+                },
                 ExpiresIn=expires_seconds,
             ),
             "headers": headers,
