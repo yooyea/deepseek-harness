@@ -29,7 +29,9 @@ jobs:
         env:
           SSHPASS: ${{ env.SERVER_PASSWORD }}
         run: |
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
           set -euo pipefail
           cd "$HOME/deepseek-harness"
           if docker info >/dev/null 2>&1; then
@@ -233,6 +235,7 @@ jobs:
 
           def wait_for(predicate, label: str, timeout: int):
               deadline = time.monotonic() + timeout
+              next_notice = time.monotonic() + 30
               last_error: Exception | None = None
               while time.monotonic() < deadline:
                   try:
@@ -247,6 +250,9 @@ jobs:
                       urllib.error.URLError,
                   ) as error:
                       last_error = error
+                  if time.monotonic() >= next_notice:
+                      print(f"waiting for {label}", flush=True)
+                      next_notice = time.monotonic() + 30
                   time.sleep(3)
               raise AssertionError(f"timed out waiting for {label}: {last_error}")
 
