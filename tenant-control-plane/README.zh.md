@@ -36,7 +36,7 @@ Compose 会启动 PostgreSQL、原始 Harness 实例、租户控制平面和备�
 - 租户控制平面：`http://SERVER:8090`
 - 新建租户：`http://SERVER:8100` 到 `http://SERVER:8199`
 
-未配置 `OSS_BUCKET` 时，GitHub Actions 会创建私有 Bucket，开启版本控制、未完成上传清理和非当前版本 90 天过期，并把最终 OSS 配置写入服务器部署。每次插件和备份上传都会显式要求 AES-256 服务端加密。
+未配置 `OSS_BUCKET` 时，GitHub Actions 会创建私有 Bucket，开启版本控制和未完成上传清理，并把最终 OSS 配置写入服务器部署。每次插件和备份上传都会显式要求 AES-256 服务端加密。
 
 `OSS_ENDPOINT` 必须使用阿里云 S3 兼容格式，例如 `https://s3.oss-cn-shanghai.aliyuncs.com`。boto3 客户端使用 OSS 兼容的 V2 签名模式。
 

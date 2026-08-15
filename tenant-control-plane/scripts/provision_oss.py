@@ -47,7 +47,6 @@ client.put_bucket_lifecycle_configuration(
                 "Status": "Enabled",
                 "Filter": {"Prefix": ""},
                 "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7},
-                "NoncurrentVersionExpiration": {"NoncurrentDays": 90},
             }
         ]
     },
