@@ -45,11 +45,13 @@ const render = (data) => {
       <td><strong>${escapeHtml(tenant.name)}</strong><small>${escapeHtml(tenant.slug)} · ${escapeHtml(tenant.access_username)}</small></td>
       <td><span class="status ${escapeHtml(tenant.status)}">${statusName[tenant.status] || escapeHtml(tenant.status)}</span><small>${escapeHtml(runtime.health)}</small></td>
       <td><a href="${escapeHtml(tenant.url)}" target="_blank" rel="noopener">${escapeHtml(tenant.url)}</a></td>
-      <td>${tenant.cpu_limit} CPU<br><small>${tenant.memory_mb} MB</small></td>
+      <td>${tenant.cpu_limit} CPU<br><small>${tenant.memory_mb} MB · ${tenant.plugins.length} 个插件</small></td>
       <td>${runtime.cpu_percent}% CPU<br><small>${runtime.memory_mb} MB (${runtime.memory_percent}%)</small></td>
       <td><div class="actions">
         <button class="secondary" data-action="${action}" data-id="${tenant.id}">${actionLabel}</button>
         <button class="secondary" data-action="restart" data-id="${tenant.id}" ${runtime.running ? '' : 'disabled'}>重启</button>
+        <button class="secondary" data-action="rebuild" data-id="${tenant.id}">重建</button>
+        <button class="secondary" data-action="recover" data-id="${tenant.id}">安全恢复</button>
         <button class="secondary danger" data-action="remove" data-id="${tenant.id}">移除</button>
       </div></td>
     </tr>`
@@ -94,7 +96,8 @@ $('#tenants').addEventListener('click', async (event) => {
   if (!button) return
   const action = button.dataset.action
   const tenantId = button.dataset.id
-  if (action === 'remove' && !confirm('确定移除这个实例吗？数据卷会保留。')) return
+  if (action === 'remove' && !confirm('确定移除这个实例吗？PostgreSQL 与 OSS 记录会保留。')) return
+  if (action === 'rebuild' && !confirm('确定删除当前容器并从 PostgreSQL 与 OSS 重建吗？')) return
   button.disabled = true
   try {
     if (action === 'remove') await api(`/api/tenants/${tenantId}`, { method: 'DELETE' })

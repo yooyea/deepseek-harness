@@ -1,30 +1,12 @@
 """Capacity admission unit tests."""
 
-from dataclasses import replace
 import unittest
+from dataclasses import replace
 
 from app.capacity import HostMetrics, evaluate_capacity
-from app.config import Settings
+from tests.helpers import settings
 
-
-SETTINGS = Settings(
-    database_path=":memory:",
-    docker_socket="/var/run/docker.sock",
-    admin_user="admin",
-    admin_password="secret",
-    tenant_image="example/harness:latest",
-    public_host="127.0.0.1",
-    tenant_scheme="http",
-    port_start=8100,
-    port_end=8199,
-    default_cpu=1,
-    default_memory_mb=1536,
-    max_cpu_percent=70,
-    max_load_ratio=0.9,
-    minimum_free_memory_mb=2048,
-    minimum_free_disk_percent=15,
-    tenant_cpu_reservation_ratio=0.8,
-)
+SETTINGS = settings()
 
 METRICS = HostMetrics(
     cpu_percent=20,

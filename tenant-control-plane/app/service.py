@@ -5,15 +5,15 @@ from __future__ import annotations
 import re
 import secrets
 import socket
-import sqlite3
 import threading
 from typing import Any
 
 from .capacity import ResourceSampler, container_usage, evaluate_capacity
 from .config import Settings
-from .database import Database
+from .crypto import SecretCipher
+from .database import Database, hash_runtime_token
 from .docker_client import DockerClient, DockerError
-
+from .object_store import ObjectStore, ObjectStoreError
 
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")
 
@@ -23,7 +23,7 @@ class TenantError(RuntimeError):
 
 
 class TenantService:
-    """Coordinates SQLite state, capacity checks and Docker operations."""
+    """Coordinate PostgreSQL state, OSS artifacts and Docker operations."""
 
     def __init__(
         self,
@@ -31,11 +31,15 @@ class TenantService:
         database: Database,
         docker: DockerClient,
         sampler: ResourceSampler,
+        cipher: SecretCipher,
+        object_store: ObjectStore,
     ) -> None:
         self.settings = settings
         self.database = database
         self.docker = docker
         self.sampler = sampler
+        self.cipher = cipher
+        self.object_store = object_store
         self._mutation_lock = threading.Lock()
 
     def dashboard(self) -> dict[str, Any]:
@@ -63,7 +67,12 @@ class TenantService:
                         runtime.update(container_usage(self.docker.container_stats(container_id)))
                 except DockerError as error:
                     runtime["health"] = "missing" if "returned 404" in str(error) else "unavailable"
-            enriched.append({**tenant, "runtime": runtime, "url": self._tenant_url(tenant)})
+            enriched.append({
+                **self._public_tenant(tenant),
+                "runtime": runtime,
+                "url": self._tenant_url(tenant),
+                "plugins": self.database.list_plugins(tenant["id"]),
+            })
         return {
             "host": metrics.as_dict(),
             "capacity": decision.as_dict(),
@@ -102,8 +111,8 @@ class TenantService:
                 raise TenantError("服务器尚未拉取指定 Harness 镜像")
             port = self._allocate_port(tenants)
             container_name = f"deepharness-tenant-{slug}"
-            volume_name = f"deepharness-tenant-{slug}-data"
             password = secrets.token_urlsafe(24)
+            runtime_token = secrets.token_urlsafe(32)
             tenant: dict[str, Any] | None = None
             try:
                 tenant = self.database.create_tenant(
@@ -114,46 +123,57 @@ class TenantService:
                         "access_username": access_username,
                         "host_port": port,
                         "container_name": container_name,
-                        "volume_name": volume_name,
                         "image": self.settings.tenant_image,
                         "cpu_limit": self.settings.default_cpu,
                         "memory_mb": self.settings.default_memory_mb,
+                        "access_password_encrypted": self.cipher.encrypt(password),
+                        "runtime_token_encrypted": self.cipher.encrypt(runtime_token),
+                        "runtime_token_hash": hash_runtime_token(runtime_token),
                     }
                 )
-                self.docker.create_volume(volume_name, slug)
                 container_id = self.docker.create_container(
                     name=container_name,
                     slug=slug,
                     image=self.settings.tenant_image,
-                    volume=volume_name,
                     host_port=port,
                     access_username=access_username,
                     access_password=password,
                     trusted_host=self.settings.public_host,
                     cpu_limit=self.settings.default_cpu,
                     memory_mb=self.settings.default_memory_mb,
+                    runtime_url=self.settings.runtime_base_url,
+                    runtime_token=runtime_token,
                 )
                 self.docker.start_container(container_id)
                 tenant = self.database.update_tenant(tenant["id"], status="running", container_id=container_id, last_error=None)
                 self.database.add_log(tenant["id"], "create", "success", f"port={port}")
-            except (DockerError, sqlite3.Error) as error:
+            except (DockerError, RuntimeError) as error:
                 if tenant:
                     self.database.update_tenant(tenant["id"], status="error", last_error=str(error))
                     self.database.add_log(tenant["id"], "create", "failed", str(error))
                 raise TenantError(str(error)) from error
-            return {**tenant, "url": self._tenant_url(tenant), "initial_password": password}
+            return {
+                **self._public_tenant(tenant),
+                "url": self._tenant_url(tenant),
+                "initial_password": password,
+            }
 
     def action(self, tenant_id: int, action: str) -> dict[str, Any]:
         """Start, stop or restart one managed tenant."""
-        if action not in {"start", "stop", "restart"}:
+        if action not in {"start", "stop", "restart", "rebuild", "recover"}:
             raise TenantError("不支持的实例操作")
         with self._mutation_lock:
             tenant = self._require_tenant(tenant_id)
             container_id = tenant.get("container_id")
-            if not container_id:
+            if not container_id and action not in {"rebuild", "recover"}:
                 raise TenantError("实例容器不存在")
             try:
-                if action == "start":
+                if action in {"rebuild", "recover"}:
+                    if action == "recover":
+                        self.database.rollback_plugins(tenant_id)
+                    tenant = self._replace_container(tenant, safe_mode=action == "recover")
+                    status = "running"
+                elif action == "start":
                     self.docker.start_container(container_id)
                     status = "running"
                 elif action == "stop":
@@ -162,31 +182,134 @@ class TenantService:
                 else:
                     self.docker.restart_container(container_id)
                     status = "running"
-                tenant = self.database.update_tenant(tenant_id, status=status, last_error=None)
+                if action not in {"rebuild", "recover"}:
+                    tenant = self.database.update_tenant(tenant_id, status=status, last_error=None)
                 self.database.add_log(tenant_id, action, "success")
-                return tenant
+                return self._public_tenant(tenant)
             except DockerError as error:
                 self.database.update_tenant(tenant_id, status="error", last_error=str(error))
                 self.database.add_log(tenant_id, action, "failed", str(error))
                 raise TenantError(str(error)) from error
 
-    def remove(self, tenant_id: int, purge_volume: bool = False) -> dict[str, Any]:
-        """Remove a managed container and optionally its persistent data."""
+    def remove(self, tenant_id: int) -> dict[str, Any]:
+        """Remove a managed container; durable state remains in PostgreSQL and OSS."""
         with self._mutation_lock:
             tenant = self._require_tenant(tenant_id)
             try:
                 if tenant.get("container_id"):
                     self.docker.remove_container(tenant["container_id"])
-                if purge_volume:
-                    self.docker.remove_volume(tenant["volume_name"])
                 tenant = self.database.update_tenant(tenant_id, status="removed", container_id=None, last_error=None)
-                detail = "volume purged" if purge_volume else "volume preserved"
-                self.database.add_log(tenant_id, "remove", "success", detail)
-                return tenant
+                self.database.add_log(tenant_id, "remove", "success", "container removed")
+                return self._public_tenant(tenant)
             except DockerError as error:
                 self.database.update_tenant(tenant_id, status="error", last_error=str(error))
                 self.database.add_log(tenant_id, "remove", "failed", str(error))
                 raise TenantError(str(error)) from error
+
+    def plugin_upload(
+        self,
+        tenant_id: int,
+        name: str,
+        version: str,
+        sha256: str,
+    ) -> dict[str, str]:
+        """Return a tenant-owned short-lived URL for one immutable plugin artifact."""
+        tenant = self._require_tenant(tenant_id)
+        key = self.object_store.plugin_key(tenant["slug"], name, version, sha256)
+        return {"artifact_key": key, "upload_url": self.object_store.create_upload_url(key, sha256)}
+
+    def register_plugin(
+        self,
+        tenant_id: int,
+        *,
+        name: str,
+        source_type: str,
+        source_ref: str | None,
+        version: str,
+        artifact_key: str,
+        sha256: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Verify an uploaded artifact before recording it as desired state."""
+        tenant = self._require_tenant(tenant_id)
+        expected = self.object_store.plugin_key(tenant["slug"], name, version, sha256)
+        if artifact_key != expected:
+            raise TenantError("插件对象路径与租户、名称或版本不匹配")
+        try:
+            self.object_store.verify(artifact_key, sha256)
+        except ObjectStoreError as error:
+            raise TenantError(str(error)) from error
+        try:
+            plugin = self.database.register_plugin_release(
+                tenant_id, name, source_type, source_ref, version, artifact_key, sha256, manifest
+            )
+        except ValueError as error:
+            raise TenantError(str(error)) from error
+        self.database.add_log(tenant_id, "plugin-register", "success", f"{name}@{version}")
+        return plugin
+
+    def runtime_plugins(self, tenant: dict[str, Any]) -> dict[str, Any]:
+        """Return desired plugin releases as short-lived private downloads."""
+        plugins = self.database.list_plugins(tenant["id"])
+        return {
+            "safe_mode": tenant["safe_mode"],
+            "plugins": [
+                {
+                    "name": plugin["name"],
+                    "version": plugin["desired_version"],
+                    "sha256": plugin["sha256"],
+                    "manifest": plugin["manifest"],
+                    "download_url": self.object_store.create_download_url(plugin["artifact_key"]),
+                }
+                for plugin in plugins
+                if plugin["desired_version"] and plugin["artifact_key"]
+            ],
+        }
+
+    def report_runtime_plugins(self, tenant: dict[str, Any], plugins: list[dict[str, Any]]) -> None:
+        """Persist a tenant container's observed plugin inventory."""
+        self.database.report_plugins(tenant["id"], plugins)
+        self.database.update_tenant(
+            tenant["id"],
+            safe_mode=False,
+            consecutive_failures=0,
+            last_error=None,
+        )
+
+    def _replace_container(self, tenant: dict[str, Any], safe_mode: bool) -> dict[str, Any]:
+        """Replace one disposable tenant container from durable desired state."""
+        if tenant.get("container_id"):
+            try:
+                self.docker.remove_container(tenant["container_id"])
+            except DockerError as error:
+                if "returned 404" not in str(error):
+                    raise
+        password = self.cipher.decrypt(tenant["access_password_encrypted"])
+        runtime_token = secrets.token_urlsafe(32)
+        container_id = self.docker.create_container(
+            name=tenant["container_name"],
+            slug=tenant["slug"],
+            image=tenant["image"],
+            host_port=tenant["host_port"],
+            access_username=tenant["access_username"],
+            access_password=password,
+            trusted_host=self.settings.public_host,
+            cpu_limit=tenant["cpu_limit"],
+            memory_mb=tenant["memory_mb"],
+            runtime_url=self.settings.runtime_base_url,
+            runtime_token=runtime_token,
+            safe_mode=safe_mode,
+        )
+        self.docker.start_container(container_id)
+        return self.database.update_tenant(
+            tenant["id"],
+            status="running",
+            container_id=container_id,
+            safe_mode=safe_mode,
+            runtime_token_encrypted=self.cipher.encrypt(runtime_token),
+            runtime_token_hash=hash_runtime_token(runtime_token),
+            last_error=None,
+        )
 
     def _require_tenant(self, tenant_id: int) -> dict[str, Any]:
         tenant = self.database.get_tenant(tenant_id)
@@ -213,3 +336,13 @@ class TenantService:
 
     def _tenant_url(self, tenant: dict[str, Any]) -> str:
         return f"{self.settings.tenant_scheme}://{self.settings.public_host}:{tenant['host_port']}"
+
+    @staticmethod
+    def _public_tenant(tenant: dict[str, Any]) -> dict[str, Any]:
+        """Remove encrypted and hashed credentials from administrator responses."""
+        hidden = {
+            "access_password_encrypted",
+            "runtime_token_encrypted",
+            "runtime_token_hash",
+        }
+        return {name: value for name, value in tenant.items() if name not in hidden}

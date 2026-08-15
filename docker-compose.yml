@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:17-bookworm
+    container_name: deepharness-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: deepharness
+      POSTGRES_USER: deepharness
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deepharness -d deepharness"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   harness:
     image: crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:${HARNESS_IMAGE_TAG:-latest}
     container_name: deepseek-harness
@@ -19,10 +35,17 @@ services:
     ports:
       - "${CONTROL_PLANE_PORT:-8090}:8090"
     environment:
-      CONTROL_PLANE_DB: /data/control-plane.db
+      DATABASE_URL: "postgresql://deepharness:${POSTGRES_PASSWORD}@postgres:5432/deepharness"
       CONTROL_PLANE_ADMIN_USER: "${CONTROL_PLANE_ADMIN_USER:-admin}"
       CONTROL_PLANE_ADMIN_PASSWORD: "${CONTROL_PLANE_ADMIN_PASSWORD:?Set CONTROL_PLANE_ADMIN_PASSWORD in .env}"
+      CONTROL_PLANE_SECRET_KEY: "${CONTROL_PLANE_SECRET_KEY:?Set CONTROL_PLANE_SECRET_KEY in .env}"
+      CONTROL_PLANE_RUNTIME_URL: "http://host.docker.internal:${CONTROL_PLANE_PORT:-8090}/api/runtime"
       CONTROL_PLANE_PUBLIC_HOST: "${CONTROL_PLANE_PUBLIC_HOST:-127.0.0.1}"
+      OSS_ENDPOINT: "${OSS_ENDPOINT:?Set OSS_ENDPOINT in .env}"
+      OSS_REGION: "${OSS_REGION:-cn-shanghai}"
+      OSS_BUCKET: "${OSS_BUCKET:?Set OSS_BUCKET in .env}"
+      ALIYUN_ID: "${ALIYUN_ID:?Set ALIYUN_ID in .env}"
+      ALIYUN_SECRET: "${ALIYUN_SECRET:?Set ALIYUN_SECRET in .env}"
       TENANT_PUBLIC_SCHEME: "${TENANT_PUBLIC_SCHEME:-http}"
       TENANT_HARNESS_IMAGE: "crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:${HARNESS_IMAGE_TAG:-latest}"
       TENANT_PORT_START: "${TENANT_PORT_START:-8100}"
@@ -35,8 +58,12 @@ services:
       CAPACITY_MIN_FREE_DISK_PERCENT: "${CAPACITY_MIN_FREE_DISK_PERCENT:-15}"
       CAPACITY_CPU_RESERVATION_RATIO: "${CAPACITY_CPU_RESERVATION_RATIO:-0.8}"
     volumes:
-      - control-plane-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -46,8 +73,28 @@ services:
       retries: 5
       start_period: 10s
 
+  control-plane-backup:
+    image: crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:${CONTROL_PLANE_IMAGE_TAG:-control-plane-latest}
+    container_name: deepharness-control-plane-backup
+    restart: unless-stopped
+    command: ["python", "-m", "app.backup"]
+    environment:
+      DATABASE_URL: "postgresql://deepharness:${POSTGRES_PASSWORD}@postgres:5432/deepharness"
+      CONTROL_PLANE_ADMIN_PASSWORD: "${CONTROL_PLANE_ADMIN_PASSWORD:?Set CONTROL_PLANE_ADMIN_PASSWORD in .env}"
+      CONTROL_PLANE_SECRET_KEY: "${CONTROL_PLANE_SECRET_KEY:?Set CONTROL_PLANE_SECRET_KEY in .env}"
+      CONTROL_PLANE_RUNTIME_URL: "http://host.docker.internal:${CONTROL_PLANE_PORT:-8090}/api/runtime"
+      OSS_ENDPOINT: "${OSS_ENDPOINT:?Set OSS_ENDPOINT in .env}"
+      OSS_REGION: "${OSS_REGION:-cn-shanghai}"
+      OSS_BUCKET: "${OSS_BUCKET:?Set OSS_BUCKET in .env}"
+      ALIYUN_ID: "${ALIYUN_ID:?Set ALIYUN_ID in .env}"
+      ALIYUN_SECRET: "${ALIYUN_SECRET:?Set ALIYUN_SECRET in .env}"
+      BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-86400}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   harness-data:
     name: deepseek-harness-data
-  control-plane-data:
-    name: deepharness-control-plane-data
+  postgres-data:
+    name: deepharness-postgres-data

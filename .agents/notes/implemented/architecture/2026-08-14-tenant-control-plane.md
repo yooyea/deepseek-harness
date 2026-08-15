@@ -1,4 +1,4 @@
-# Agent Note: Tenant control plane provisions isolated Harness instances
+# Agent Note: Tenant control plane reconstructs disposable Harness instances
 
 Status: implemented
 
@@ -6,33 +6,36 @@ English | [中文](2026-08-14-tenant-control-plane.zh.md)
 
 ## Problem
 
-Harness has no authenticated account, tenant ownership, or role model. The deployment's `admin` credential protects one shared instance at the reverse proxy, so adding more proxy credentials would still expose the same sessions, workspaces, settings, and data to every operator.
+Harness has no authenticated account, tenant ownership, or role model. Sharing one instance behind several proxy credentials does not isolate sessions, workspaces, settings, plugins, or failures.
 
-Adding tenant ownership inside Harness would couple deployment administration to its fast-moving session, workspace, settings, credential, and client APIs. The immediate deployment needs isolated users, bounded server capacity, and an operator view without changing those product domains.
+Container-local plugin installation also makes lifecycle recovery ambiguous. A changed profile may prevent Harness from booting, while an artifact written only into a container disappears when that container is replaced.
 
 ## Decision
 
-DeepHarness tenant management runs as a deployment-owned control plane outside the Harness package graph. One tenant maps to one resource-limited Harness container, one host port, and one persistent Docker volume. The control plane stores desired instance state and administrative operations in SQLite with WAL mode enabled.
+DeepHarness tenant management runs outside the Harness package graph. One tenant maps to one resource-limited, disposable Harness container and one host port. PostgreSQL owns tenant identity, reconstructable encrypted credentials, resource policy, operation history, and plugin desired, observed, and last-healthy versions.
 
-The integration surface is the published Harness image, its `/data` volume, its Basic Auth environment variables, and Docker container state. Harness session, workspace, credential, and plugin persistence remains unchanged.
+Private Alibaba Cloud OSS owns immutable plugin package tarballs and compressed logical PostgreSQL backups. Each object key includes the tenant, plugin, and version. Upload commits require a tenant-owned key and a matching SHA-256 digest. Tenant containers receive short-lived object URLs and never receive Alibaba Cloud credentials.
 
-Creating a tenant checks sampled host CPU, one-minute load, available memory, disk free percentage, and the sum of active tenant CPU and memory reservations. Error-state instances continue to count as reserved because Docker resources may still exist until an administrator removes them.
+Tenant `/data` is a tmpfs. Before Harness starts, the image queries the control plane with a hashed and encrypted tenant runtime token, downloads desired plugin releases, verifies each digest, and installs each exact tarball with package lifecycle scripts disabled. A failed release is omitted from boot and recorded for reconciliation. The base process remains available for recovery.
 
-The control plane requires a separate administrator credential and a mutation header for state-changing API requests. Tenant passwords are generated once and are not stored in SQLite. Docker operations validate a management label before changing an existing container, and creation accepts only configured resource limits, image, port range, and generated names.
+The tenant image exposes `deepharness-plugin-publish` and injects workspace guidance. Generated installable bundles are packed, uploaded through a short-lived URL, registered as immutable desired state, and only then allowed to request their own container rebuild. Upstream process-local `cordis_define` definitions are not silently presented as durable; they must be converted into an installable bundle first.
 
-Removing a tenant deletes its container but preserves its volume unless the API caller explicitly requests purge. Operation logs retain the outcome and error detail. SQLite and tenant Docker volumes are independent backup units.
+The control plane reconstructs a tenant by removing the labelled container, rotating its runtime token, decrypting its Basic Auth password, and creating a replacement from PostgreSQL state. Safe recovery sets `DSH_PLUGIN_SAFE_MODE=1` and does not restore tenant plugins. The runtime reports plugin observations only after Harness HTTP readiness, so a process that fails during boot cannot promote a release to last healthy.
+
+PostgreSQL remains private to the Compose network and uses one durable database volume. A separate control-plane process exports logical table state to encrypted OSS objects daily. Tenant containers and plugin artifacts do not rely on Docker volumes.
 
 ## Alternatives considered
 
-- **Add users and tenant ownership to Harness core**: rejected because every session, workspace, settings, credential, API, and WebSocket path would need principal-aware authorization and migration.
-- **Add several Caddy Basic Auth users to one Harness instance**: rejected because it separates credentials but not data, settings, privileges, or audit ownership.
-- **Store tenants only as generated Compose files**: rejected because lifecycle state, resource admission, runtime reconciliation, and operation history need queryable durable state.
-- **Use PostgreSQL for the control plane**: rejected for the single-controller deployment because SQLite WAL provides the required durability and transactions without another service.
+- **Add tenant ownership inside Harness core**: rejected because session, workspace, settings, credentials, APIs, WebSockets, and every plugin would need principal-aware authorization.
+- **Keep SQLite and tenant Docker volumes**: rejected because a single host would remain the authority for instance and plugin recovery, preventing reliable reconstruction on another machine.
+- **Mount OSS as the plugin filesystem**: rejected because object storage does not provide the filesystem semantics required by Node package resolution and plugin installation.
+- **Give OSS credentials to each tenant**: rejected because a compromised plugin could access other tenant artifacts or backups; short-lived object URLs preserve tenant isolation.
+- **Run package lifecycle scripts**: rejected because installation scripts execute outside the Cordis lifecycle and can modify the container before plugin validation.
 
 ## Consequences
 
-- Tenants receive separate runtime state, data volumes, credentials, resource limits, and failure domains while consuming the same immutable Harness image.
-- Harness upgrades remain image changes and do not require tenant-aware migrations inside Harness.
-- The control plane is a single active process while it uses SQLite; horizontal control-plane replicas are unsupported.
-- Mounting the Docker socket grants host-equivalent container control, so the service remains an administrative component behind authentication and should move to a narrow host-agent API before multi-host deployment.
-- Standard-library unit tests cover admission, SQLite updates, and lifecycle orchestration; API smoke tests cover authentication, health, dashboard serialization, and static delivery.
+- A tenant container can be deleted and rebuilt from PostgreSQL and OSS without retaining its writable layer.
+- Plugin state distinguishes operator intent from runtime observation and does not mark a release healthy before the application is reachable.
+- DSH session and workspace data remain ephemeral in tenant containers until their storage providers gain database and object-store implementations.
+- PostgreSQL is an additional operational dependency and its data volume remains necessary; OSS logical backups provide host-loss recovery.
+- The Docker socket remains host-equivalent authority and requires an authenticated administrative deployment.

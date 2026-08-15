@@ -8,7 +8,6 @@ import socket
 from typing import Any
 from urllib.parse import quote, urlencode
 
-
 MANAGED_LABEL = "com.deepharness.tenant-managed"
 TENANT_LABEL = "com.deepharness.tenant-slug"
 
@@ -90,32 +89,21 @@ class DockerClient:
                 return False
             raise
 
-    def create_volume(self, name: str, slug: str) -> None:
-        """Create an idempotent tenant data volume."""
-        self._request(
-            "POST",
-            "/volumes/create",
-            {"Name": name, "Labels": {MANAGED_LABEL: "true", TENANT_LABEL: slug}},
-            expected=(201,),
-        )
-
-    def remove_volume(self, name: str) -> None:
-        """Remove a tenant volume."""
-        self._request("DELETE", f"/volumes/{quote(name, safe='')}", expected=(204, 404))
-
     def create_container(
         self,
         *,
         name: str,
         slug: str,
         image: str,
-        volume: str,
         host_port: int,
         access_username: str,
         access_password: str,
         trusted_host: str,
         cpu_limit: float,
         memory_mb: int,
+        runtime_url: str,
+        runtime_token: str,
+        safe_mode: bool = False,
     ) -> str:
         """Create a resource-limited Harness container."""
         query = urlencode({"name": name})
@@ -128,11 +116,15 @@ class DockerClient:
                     f"DSH_ACCESS_USER={access_username}",
                     f"DSH_ACCESS_PASSWORD={access_password}",
                     f"DSH_TRUSTED_HOST={trusted_host}",
+                    f"DEEPHARNESS_CONTROL_PLANE_URL={runtime_url}",
+                    f"DEEPHARNESS_TENANT_TOKEN={runtime_token}",
+                    f"DSH_PLUGIN_SAFE_MODE={'1' if safe_mode else '0'}",
                 ],
                 "Labels": {MANAGED_LABEL: "true", TENANT_LABEL: slug},
                 "ExposedPorts": {"8080/tcp": {}},
                 "HostConfig": {
-                    "Binds": [f"{volume}:/data"],
+                    "Tmpfs": {"/data": f"rw,exec,nosuid,nodev,size={max(memory_mb // 2, 256)}m"},
+                    "ExtraHosts": ["host.docker.internal:host-gateway"],
                     "PortBindings": {"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(host_port)}]},
                     "RestartPolicy": {"Name": "unless-stopped"},
                     "Memory": memory_mb * 1024 * 1024,

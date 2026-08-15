@@ -1,40 +1,24 @@
-"""SQLite repository unit tests."""
+"""PostgreSQL schema and runtime-token tests."""
 
-from pathlib import Path
-import tempfile
 import unittest
 
-from app.database import Database
+from app.database import SCHEMA, hash_runtime_token
 
 
 class DatabaseTests(unittest.TestCase):
-    """Tenant records and logs persist together."""
+    """Durable state includes tenant plugin reconciliation fields."""
 
-    def test_tenant_lifecycle_and_log(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database = Database(str(Path(directory) / "control-plane.db"))
-            database.initialize()
-            tenant = database.create_tenant(
-                {
-                    "slug": "alice",
-                    "name": "Alice",
-                    "status": "creating",
-                    "access_username": "admin",
-                    "host_port": 8100,
-                    "container_name": "deepharness-tenant-alice",
-                    "volume_name": "deepharness-tenant-alice-data",
-                    "image": "example/harness:latest",
-                    "cpu_limit": 1,
-                    "memory_mb": 1536,
-                }
-            )
-            database.update_tenant(tenant["id"], status="running", container_id="container-id")
-            database.add_log(tenant["id"], "create", "success")
+    def test_schema_owns_plugin_versions_and_safe_mode(self) -> None:
+        self.assertIn("CREATE TABLE IF NOT EXISTS tenant_plugins", SCHEMA)
+        self.assertIn("CREATE TABLE IF NOT EXISTS plugin_releases", SCHEMA)
+        self.assertIn("last_healthy_version", SCHEMA)
+        self.assertIn("safe_mode", SCHEMA)
 
-            loaded = database.get_tenant(tenant["id"])
-            self.assertEqual(loaded["status"], "running")
-            self.assertEqual(loaded["container_id"], "container-id")
-            self.assertEqual(database.list_logs()[0]["tenant_name"], "Alice")
+    def test_runtime_token_hash_is_stable_and_irreversible(self) -> None:
+        digest = hash_runtime_token("tenant-token")
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(digest, hash_runtime_token("tenant-token"))
+        self.assertNotIn("tenant-token", digest)
 
 
 if __name__ == "__main__":
