@@ -36,7 +36,7 @@ Default endpoints:
 - Tenant control plane: `http://SERVER:8090`
 - Provisioned tenants: `http://SERVER:8100` through `http://SERVER:8199`
 
-GitHub Actions creates a private OSS bucket when `OSS_BUCKET` is not configured, enables versioning, incomplete-upload cleanup, and 90-day noncurrent-version expiration, then writes the resolved OSS configuration to the server deployment. Every plugin and backup upload explicitly requests AES-256 server-side encryption.
+GitHub Actions creates a private OSS bucket when `OSS_BUCKET` is not configured, enables versioning and incomplete-upload cleanup, then writes the resolved OSS configuration to the server deployment. Every plugin and backup upload explicitly requests AES-256 server-side encryption.
 
 `OSS_ENDPOINT` must use Alibaba Cloud's S3-compatible form, for example `https://s3.oss-cn-shanghai.aliyuncs.com`. The boto3 client uses the OSS-compatible V2 signature mode.
 
