@@ -107,8 +107,10 @@ jobs:
           fi
           "${docker_cmd[@]}" cp deepseek-harness:/data/.credentials.yaml "$credential_copy"
           "${file_cmd[@]}" chmod 600 "$credential_copy"
-          "${docker_cmd[@]}" cp "$credential_copy" "deepharness-tenant-${slug}:/data/.credentials.yaml"
-          "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" chmod 600 /data/.credentials.yaml
+          "${docker_cmd[@]}" cp "$credential_copy" "deepharness-tenant-${slug}:/tmp/model-credential.yaml"
+          "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" \
+            install -m 600 /tmp/model-credential.yaml /data/.credentials.yaml
+          "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" rm -f /tmp/model-credential.yaml
           "${file_cmd[@]}" rm -f "$credential_copy"
 
           # docker cp replaces the credential file after DSH has already started.
