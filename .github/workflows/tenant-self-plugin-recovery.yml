@@ -109,7 +109,24 @@ jobs:
           "${docker_cmd[@]}" cp deepseek-harness:/data/.credentials.yaml "$credential_copy"
           "${file_cmd[@]}" chmod 600 "$credential_copy"
           "${docker_cmd[@]}" cp "$credential_copy" "deepharness-tenant-${slug}:/data/.credentials.yaml"
+          "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" chmod 600 /data/.credentials.yaml
           "${file_cmd[@]}" rm -f "$credential_copy"
+
+          # docker cp replaces the credential file after DSH has already started.
+          # Restart once so the credential provider reads it deterministically;
+          # this restart is test setup, before the model-generated plugin flow.
+          "${docker_cmd[@]}" restart "deepharness-tenant-${slug}" >/dev/null
+          for attempt in $(seq 1 60); do
+            if "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" node -e \
+              "fetch('http://127.0.0.1:3080/api/default_config.content.json').then(r=>{if(!r.ok)process.exit(1)})"; then
+              break
+            fi
+            if [[ "$attempt" -eq 60 ]]; then
+              echo "Temporary tenant did not become ready after credential restart." >&2
+              exit 1
+            fi
+            sleep 2
+          done
 
           "${compose_cmd[@]}" exec -T -e SMOKE_SLUG="$slug" tenant-control-plane python - <<'PY'
           from __future__ import annotations
@@ -287,6 +304,13 @@ jobs:
           created = rpc("session.create", {"cwd": "/data", "agentPreset": "standard"})
           assert isinstance(created, dict)
           session_id = str(created["sessionId"])
+          credentials = rpc("credentials.describe", {"refs": ["DEEPSEEK_API_KEY"]})
+          assert (
+              isinstance(credentials, dict)
+              and isinstance(credentials.get("credentials"), dict)
+              and credentials["credentials"].get("DEEPSEEK_API_KEY", {}).get("configured") is True
+          ), credentials
+          checks.append("temporary tenant loaded the configured DeepSeek credential")
           models = rpc("session.models", {"sessionId": session_id})
           assert isinstance(models, dict) and models.get("routable") is True
           checks.append("tenant model route is configured and routable")
