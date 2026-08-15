@@ -30,10 +30,9 @@ try:
 except ClientError as error:
     if error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
         raise
-    client.create_bucket(
-        Bucket=bucket,
-        CreateBucketConfiguration={"LocationConstraint": region},
-    )
+    # OSS selects the region from the endpoint and rejects AWS's
+    # CreateBucketConfiguration.LocationConstraint payload.
+    client.create_bucket(Bucket=bucket)
 
 client.put_bucket_versioning(
     Bucket=bucket,
