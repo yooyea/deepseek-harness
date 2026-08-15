@@ -50,7 +50,11 @@ try {
     throw new Error(`upload reservation returned HTTP ${uploadReservation.status}: ${await uploadReservation.text()}`)
   }
   const upload = await uploadReservation.json()
-  const uploaded = await fetch(upload.upload_url, { method: 'PUT', body: content })
+  const uploaded = await fetch(upload.upload_url, {
+    method: 'PUT',
+    headers: upload.upload_headers ?? {},
+    body: content,
+  })
   if (!uploaded.ok) throw new Error(`OSS upload returned HTTP ${uploaded.status}: ${await uploaded.text()}`)
 
   const registered = await fetch(`${baseUrl}/plugins/register`, {

@@ -212,11 +212,16 @@ class TenantService:
         name: str,
         version: str,
         sha256: str,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Return a tenant-owned short-lived URL for one immutable plugin artifact."""
         tenant = self._require_tenant(tenant_id)
         key = self.object_store.plugin_key(tenant["slug"], name, version, sha256)
-        return {"artifact_key": key, "upload_url": self.object_store.create_upload_url(key, sha256)}
+        upload = self.object_store.create_upload(key, sha256)
+        return {
+            "artifact_key": key,
+            "upload_url": upload["url"],
+            "upload_headers": upload["headers"],
+        }
 
     def register_plugin(
         self,

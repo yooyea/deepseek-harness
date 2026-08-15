@@ -25,8 +25,8 @@ class FakeStore:
     def plugin_key(self, slug: str, name: str, version: str, sha256: str) -> str:
         return f"tenants/{slug}/{name}/{version}/{sha256}.tgz"
 
-    def create_upload_url(self, key: str, _: str) -> str:
-        return f"https://upload/{key}"
+    def create_upload(self, key: str, _: str):
+        return {"url": f"https://upload/{key}", "headers": {"x-amz-server-side-encryption": "AES256"}}
 
     def create_download_url(self, key: str) -> str:
         return f"https://download/{key}"

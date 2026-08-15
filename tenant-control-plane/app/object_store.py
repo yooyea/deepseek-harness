@@ -51,15 +51,19 @@ class ObjectStore:
         safe_name = plugin_name.replace("/", "__").replace("@", "")
         return f"tenants/{tenant_slug}/plugins/{safe_name}/{version}/{sha256.lower()}.tgz"
 
-    def create_upload_url(self, key: str, sha256: str, expires_seconds: int = 900) -> str:
-        """Create a short-lived upload URL after validating the checksum claim."""
+    def create_upload(self, key: str, sha256: str, expires_seconds: int = 900) -> dict[str, object]:
+        """Create an encrypted short-lived upload request after validating the checksum claim."""
         if len(sha256) != 64:
             raise ObjectStoreError("plugin artifact checksum must be SHA-256")
-        return self.client.generate_presigned_url(
-            "put_object",
-            Params={"Bucket": self.bucket, "Key": key},
-            ExpiresIn=expires_seconds,
-        )
+        headers = {"x-amz-server-side-encryption": "AES256"}
+        return {
+            "url": self.client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.bucket, "Key": key, "ServerSideEncryption": "AES256"},
+                ExpiresIn=expires_seconds,
+            ),
+            "headers": headers,
+        }
 
     def create_download_url(self, key: str, expires_seconds: int = 300) -> str:
         """Create a short-lived download URL for a private artifact."""
