@@ -93,7 +93,7 @@ jobs:
 
           from app.main import service
 
-          service.create_tenant(
+          service.create(
               name="Model-generated plugin crash recovery",
               slug=os.environ["SMOKE_SLUG"],
               access_username="model-smoke",
