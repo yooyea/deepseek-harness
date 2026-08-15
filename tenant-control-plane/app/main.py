@@ -185,7 +185,7 @@ def runtime_plugins(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/runtime/plugins/uploads")
-def runtime_plugin_upload(request: Request, payload: PluginUpload) -> dict[str, str]:
+def runtime_plugin_upload(request: Request, payload: PluginUpload) -> dict[str, Any]:
     """Reserve a tenant-owned OSS key and short-lived upload URL."""
     tenant = _runtime_tenant(request)
     return service.plugin_upload(tenant["id"], payload.name, payload.version, payload.sha256)

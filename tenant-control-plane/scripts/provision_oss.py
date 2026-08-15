@@ -38,12 +38,6 @@ client.put_bucket_versioning(
     Bucket=bucket,
     VersioningConfiguration={"Status": "Enabled"},
 )
-client.put_bucket_encryption(
-    Bucket=bucket,
-    ServerSideEncryptionConfiguration={
-        "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}],
-    },
-)
 client.put_bucket_lifecycle_configuration(
     Bucket=bucket,
     LifecycleConfiguration={
