@@ -303,6 +303,16 @@ jobs:
           models = rpc("session.models", {"sessionId": session_id})
           assert isinstance(models, dict) and models.get("routable") is True
           checks.append("tenant model route is configured and routable")
+          permission = rpc(
+              "session.prompt",
+              {
+                  "sessionId": session_id,
+                  "mode": "queue",
+                  "content": [{"type": "text", "text": "/permission danger-full-access"}],
+              },
+          )
+          assert isinstance(permission, dict) and permission.get("command", {}).get("kind") == "success"
+          checks.append("tenant explicitly enabled non-interactive full access for plugin authoring")
           prompt = f"""
           Work directly in the terminal and complete this task; do not merely explain it.
           Create a minimal installable DeepHarness DSH bundle plugin at
@@ -311,6 +321,8 @@ jobs:
           dsh.bundle.patch as ./cordis.patch.yml, and the patch must insert one harmless
           plugin row whose name is {plugin_name}. Then run exactly:
           deepharness-plugin-publish /data/generated-survivor-plugin --rebuild
+          Do not inspect /opt/dsh or ask for approval. Use the write tool to create exactly
+          package.json, index.js, and cordis.patch.yml, then run the publish command.
           The managed-tenant AGENTS.md instructions are authoritative. Do not restart DSH or
           Docker yourself. The final command will intentionally replace this container.
           """.strip()
