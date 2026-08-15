@@ -1,0 +1,400 @@
+name: Tenant-generated plugin crash recovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/tenant-self-plugin-recovery.yml
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_NAME: ${{ secrets.SERVER_NAME }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
+    steps:
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Let DSH create a plugin, destroy its container, and recover it
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/deepseek-harness"
+          if docker info >/dev/null 2>&1; then
+            docker_cmd=(docker)
+            compose_cmd=(docker compose)
+            file_cmd=()
+          else
+            docker_cmd=(sudo -n docker)
+            compose_cmd=(sudo -n docker compose)
+            file_cmd=(sudo -n)
+          fi
+          umask 077
+
+          slug="model-crash-$(date +%s)"
+          credential_copy="/tmp/${slug}-credentials.yaml"
+
+          cleanup() {
+            "${file_cmd[@]}" rm -f "$credential_copy"
+            "${compose_cmd[@]}" exec -T -e SMOKE_SLUG="$slug" tenant-control-plane python - <<'PY' || true
+          import os
+          import urllib.error
+          import urllib.request
+
+          from app.config import Settings
+          from app.crypto import SecretCipher
+          from app.database import Database
+          from app.docker_client import DockerClient, DockerError
+          from app.object_store import ObjectStore
+
+          settings = Settings.from_env()
+          database = Database(settings.database_url)
+          cipher = SecretCipher(settings.secret_key)
+          docker = DockerClient(settings.docker_socket)
+          store = ObjectStore(
+              settings.oss_endpoint,
+              settings.oss_region,
+              settings.oss_bucket,
+              settings.oss_access_key_id,
+              settings.oss_access_key_secret,
+          )
+          slug = os.environ["SMOKE_SLUG"]
+          tenant = next((item for item in database.list_tenants(True) if item["slug"] == slug), None)
+          if tenant is not None:
+              if tenant.get("container_id"):
+                  try:
+                      docker.remove_container(tenant["container_id"])
+                  except DockerError:
+                      pass
+              with database.connection() as connection:
+                  connection.execute("DELETE FROM tenants WHERE id = %s", (tenant["id"],))
+          prefix = f"tenants/{slug}/"
+          listed = store.client.list_objects_v2(Bucket=store.bucket, Prefix=prefix)
+          for item in listed.get("Contents", []):
+              store.client.delete_object(Bucket=store.bucket, Key=item["Key"])
+          PY
+          }
+          trap cleanup EXIT
+
+          "${compose_cmd[@]}" exec -T -e SMOKE_SLUG="$slug" tenant-control-plane python - <<'PY'
+          import os
+
+          from app.main import service
+
+          service.create_tenant(
+              name="Model-generated plugin crash recovery",
+              slug=os.environ["SMOKE_SLUG"],
+              access_username="model-smoke",
+          )
+          PY
+
+          if ! "${docker_cmd[@]}" exec deepseek-harness test -s /data/.credentials.yaml; then
+            echo "The primary Harness has no configured model credential to lend to the temporary tenant." >&2
+            exit 1
+          fi
+          "${docker_cmd[@]}" cp deepseek-harness:/data/.credentials.yaml "$credential_copy"
+          "${file_cmd[@]}" chmod 600 "$credential_copy"
+          "${docker_cmd[@]}" cp "$credential_copy" "deepharness-tenant-${slug}:/data/.credentials.yaml"
+          "${file_cmd[@]}" rm -f "$credential_copy"
+
+          "${compose_cmd[@]}" exec -T -e SMOKE_SLUG="$slug" tenant-control-plane python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from typing import Any
+
+          from app.config import Settings
+          from app.crypto import SecretCipher
+          from app.database import Database
+          from app.docker_client import DockerClient, DockerError
+          from app.object_store import ObjectStore
+
+          settings = Settings.from_env()
+          database = Database(settings.database_url)
+          cipher = SecretCipher(settings.secret_key)
+          docker = DockerClient(settings.docker_socket)
+          store = ObjectStore(
+              settings.oss_endpoint,
+              settings.oss_region,
+              settings.oss_bucket,
+              settings.oss_access_key_id,
+              settings.oss_access_key_secret,
+          )
+          base_url = "http://127.0.0.1:8090"
+          admin = base64.b64encode(
+              f"{settings.admin_user}:{settings.admin_password}".encode()
+          ).decode()
+          slug = os.environ["SMOKE_SLUG"]
+          plugin_name = f"deepharness-survivor-{slug.removeprefix('model-crash-')}"
+          plugin_version = "1.0.0"
+          checks: list[str] = []
+
+
+          def request(
+              method: str,
+              url: str,
+              payload: object | None = None,
+              *,
+              authorization: str | None = None,
+              headers: dict[str, str] | None = None,
+              expected: tuple[int, ...] = (200,),
+              timeout: int = 30,
+          ) -> tuple[int, object | None]:
+              body = None if payload is None else json.dumps(payload).encode()
+              request_headers = dict(headers or {})
+              if authorization is not None:
+                  request_headers["Authorization"] = authorization
+              if payload is not None:
+                  request_headers["Content-Type"] = "application/json"
+              req = urllib.request.Request(url, data=body, method=method, headers=request_headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      status = response.status
+                      content = response.read()
+                      content_type = response.headers.get("Content-Type", "")
+              except urllib.error.HTTPError as error:
+                  status = error.code
+                  content = error.read()
+                  content_type = error.headers.get("Content-Type", "")
+              if status not in expected:
+                  detail = content.decode(errors="replace")[:1000]
+                  raise AssertionError(f"{method} request returned HTTP {status}: {detail}")
+              if not content:
+                  return status, None
+              if "json" in content_type or content[:1] in {b"{", b"["}:
+                  return status, json.loads(content)
+              return status, content
+
+
+          def admin_request(
+              method: str,
+              path: str,
+              payload: object | None = None,
+              expected: tuple[int, ...] = (200,),
+          ) -> tuple[int, object | None]:
+              headers = {"X-Control-Plane-CSRF": "1"} if method not in {"GET", "HEAD"} else {}
+              return request(
+                  method,
+                  base_url + path,
+                  payload,
+                  authorization=f"Basic {admin}",
+                  headers=headers,
+                  expected=expected,
+              )
+
+
+          def tenant_row() -> dict[str, Any]:
+              tenant = next(
+                  (item for item in database.list_tenants(True) if item["slug"] == slug),
+                  None,
+              )
+              if tenant is None:
+                  raise AssertionError("temporary tenant disappeared from PostgreSQL")
+              return tenant
+
+
+          tenant = tenant_row()
+          tenant_id = int(tenant["id"])
+          host_port = int(tenant["host_port"])
+          initial_container_id = str(tenant["container_id"])
+          password = cipher.decrypt(tenant["access_password_encrypted"])
+          tenant_auth = base64.b64encode(f"model-smoke:{password}".encode()).decode()
+          tenant_origin = f"http://host.docker.internal:{host_port}"
+          tenant_headers = {"Host": f"{settings.public_host}:{host_port}"}
+
+
+          def tenant_ready() -> bool:
+              status, _ = request(
+                  "GET",
+                  tenant_origin + "/",
+                  authorization=f"Basic {tenant_auth}",
+                  headers=tenant_headers,
+                  expected=(200, 502, 503),
+              )
+              return status == 200
+
+
+          def wait_for(predicate, label: str, timeout: int):
+              deadline = time.monotonic() + timeout
+              last_error: Exception | None = None
+              while time.monotonic() < deadline:
+                  try:
+                      value = predicate()
+                      if value:
+                          return value
+                  except (
+                      AssertionError,
+                      KeyError,
+                      StopIteration,
+                      TimeoutError,
+                      urllib.error.URLError,
+                  ) as error:
+                      last_error = error
+                  time.sleep(3)
+              raise AssertionError(f"timed out waiting for {label}: {last_error}")
+
+
+          wait_for(tenant_ready, "initial tenant readiness", 120)
+
+
+          def rpc(method: str, payload: object) -> object:
+              _, envelope = request(
+                  "POST",
+                  f"{tenant_origin}/api/{method}",
+                  {
+                      "type": "client-request",
+                      "rpcId": f"model-crash-{method}-{time.time_ns()}",
+                      "method": method,
+                      "payload": payload,
+                  },
+                  authorization=f"Basic {tenant_auth}",
+                  headers=tenant_headers,
+              )
+              assert isinstance(envelope, dict)
+              result = envelope.get("result")
+              assert isinstance(result, dict)
+              if not result.get("ok"):
+                  error = result.get("error", {})
+                  raise AssertionError(
+                      f"{method} failed: {error.get('code')}: {error.get('message')}"
+                  )
+              return result.get("value")
+
+
+          created = rpc("session.create", {"cwd": "/data"})
+          assert isinstance(created, dict)
+          session_id = str(created["sessionId"])
+          prompt = f"""
+          Work directly in the terminal and complete this task; do not merely explain it.
+          Create a minimal installable DeepHarness DSH bundle plugin at
+          /data/generated-survivor-plugin with npm package name {plugin_name} and version
+          {plugin_version}. It must contain valid ESM, package.json must declare
+          dsh.bundle.patch as ./cordis.patch.yml, and the patch must insert one harmless
+          plugin row whose name is {plugin_name}. Then run exactly:
+          deepharness-plugin-publish /data/generated-survivor-plugin --rebuild
+          The managed-tenant AGENTS.md instructions are authoritative. Do not restart DSH or
+          Docker yourself. The final command will intentionally replace this container.
+          """.strip()
+          accepted = rpc(
+              "session.prompt",
+              {
+                  "sessionId": session_id,
+                  "mode": "queue",
+                  "content": [{"type": "text", "text": prompt}],
+              },
+          )
+          assert isinstance(accepted, dict) and accepted.get("accepted") is True
+          checks.append("DSH accepted the plugin-generation task")
+
+
+          def generated_plugin_healthy():
+              _, dashboard = admin_request("GET", "/api/dashboard")
+              assert isinstance(dashboard, dict)
+              row = next(item for item in dashboard["tenants"] if int(item["id"]) == tenant_id)
+              plugin = next(
+                  (item for item in row["plugins"] if item["name"] == plugin_name),
+                  None,
+              )
+              if plugin is None or plugin["status"] != "healthy":
+                  return None
+              return {"tenant": row, "plugin": plugin}
+
+
+          first = wait_for(
+              generated_plugin_healthy,
+              "DSH-generated plugin publication, rebuild, and health report",
+              480,
+          )
+          first_plugin = first["plugin"]
+          first_tenant = tenant_row()
+          first_rebuilt_container_id = str(first_tenant["container_id"])
+          assert first_rebuilt_container_id != initial_container_id
+          assert first_plugin["desired_version"] == plugin_version
+          assert first_plugin["observed_version"] == plugin_version
+          assert first_plugin["last_healthy_version"] == plugin_version
+          checks.append("DSH generated, published, and activated its own plugin")
+
+          plugin = next(item for item in database.list_plugins(tenant_id) if item["name"] == plugin_name)
+          artifact_key = str(plugin["artifact_key"])
+          sha256 = str(plugin["sha256"])
+          metadata = store.client.head_object(Bucket=store.bucket, Key=artifact_key)
+          assert int(metadata["ContentLength"]) > 0
+          assert metadata.get("ServerSideEncryption") == "AES256"
+          checks.append("plugin artifact and desired state persisted in OSS and PostgreSQL")
+
+          docker.remove_container(first_rebuilt_container_id)
+          try:
+              docker.inspect_container(first_rebuilt_container_id)
+              raise AssertionError("force-removed tenant container still exists")
+          except DockerError as error:
+              assert "returned 404" in str(error)
+          stale = tenant_row()
+          assert str(stale["container_id"]) == first_rebuilt_container_id
+          persisted = next(
+              item for item in database.list_plugins(tenant_id) if item["name"] == plugin_name
+          )
+          assert persisted["sha256"] == sha256 and persisted["artifact_key"] == artifact_key
+          checks.append("tenant container was force-destroyed outside the control plane")
+
+          admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "rebuild"})
+
+
+          def recovered_plugin_healthy():
+              current = tenant_row()
+              if str(current["container_id"]) == first_rebuilt_container_id:
+                  return None
+              _, dashboard = admin_request("GET", "/api/dashboard")
+              assert isinstance(dashboard, dict)
+              row = next(item for item in dashboard["tenants"] if int(item["id"]) == tenant_id)
+              plugin_row = next(
+                  (item for item in row["plugins"] if item["name"] == plugin_name),
+                  None,
+              )
+              if not plugin_row or plugin_row["status"] != "healthy":
+                  return None
+              return {"tenant": current, "plugin": plugin_row}
+
+
+          recovered = wait_for(
+              recovered_plugin_healthy,
+              "container recreation and persisted plugin restoration",
+              240,
+          )
+          wait_for(tenant_ready, "recovered tenant web readiness", 120)
+          recovered_plugin = recovered["plugin"]
+          assert recovered_plugin["desired_version"] == plugin_version
+          assert recovered_plugin["observed_version"] == plugin_version
+          assert recovered_plugin["last_healthy_version"] == plugin_version
+          assert str(recovered["tenant"]["container_id"]) != first_rebuilt_container_id
+          checks.append("destroyed container rebuilt with the identical persisted plugin")
+
+          print(
+              json.dumps(
+                  {
+                      "status": "ok",
+                      "plugin": {"name": plugin_name, "version": plugin_version, "sha256": sha256},
+                      "checks": checks,
+                      "cleanup": "scheduled by shell trap",
+                  },
+                  ensure_ascii=False,
+              )
+          )
+          PY
+          REMOTE
