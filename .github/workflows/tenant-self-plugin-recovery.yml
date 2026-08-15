@@ -284,9 +284,12 @@ jobs:
               return result.get("value")
 
 
-          created = rpc("session.create", {"cwd": "/data"})
+          created = rpc("session.create", {"cwd": "/data", "agentPreset": "standard"})
           assert isinstance(created, dict)
           session_id = str(created["sessionId"])
+          models = rpc("session.models", {"sessionId": session_id})
+          assert isinstance(models, dict) and models.get("routable") is True
+          checks.append("tenant model route is configured and routable")
           prompt = f"""
           Work directly in the terminal and complete this task; do not merely explain it.
           Create a minimal installable DeepHarness DSH bundle plugin at
@@ -311,11 +314,13 @@ jobs:
 
 
           def generated_plugin_healthy():
-              _, dashboard = admin_request("GET", "/api/dashboard")
-              assert isinstance(dashboard, dict)
-              row = next(item for item in dashboard["tenants"] if int(item["id"]) == tenant_id)
+              row = tenant_row()
               plugin = next(
-                  (item for item in row["plugins"] if item["name"] == plugin_name),
+                  (
+                      item
+                      for item in database.list_plugins(tenant_id)
+                      if item["name"] == plugin_name
+                  ),
                   None,
               )
               if plugin is None or plugin["status"] != "healthy":
@@ -323,11 +328,94 @@ jobs:
               return {"tenant": row, "plugin": plugin}
 
 
-          first = wait_for(
-              generated_plugin_healthy,
-              "DSH-generated plugin publication, rebuild, and health report",
-              480,
-          )
+          try:
+              first = wait_for(
+                  generated_plugin_healthy,
+                  "DSH-generated plugin publication, rebuild, and health report",
+                  480,
+              )
+          except AssertionError as wait_error:
+              current = tenant_row()
+              plugin_rows = database.list_plugins(tenant_id)
+              with database.connection() as connection:
+                  operations = connection.execute(
+                      """
+                      SELECT action, status, detail, created_at
+                      FROM operation_logs
+                      WHERE tenant_id = %s
+                      ORDER BY id DESC
+                      LIMIT 12
+                      """,
+                      (tenant_id,),
+                  ).fetchall()
+              history_types: list[str] = []
+              history_tail: list[object] = []
+              if str(current.get("container_id")) == initial_container_id:
+                  try:
+                      history = rpc(
+                          "session.history",
+                          {"sessionId": session_id, "maxMessages": 8},
+                      )
+                      if isinstance(history, dict):
+                          entries = history.get("events", [])
+                          history_types = [
+                              str(entry.get("event", {}).get("type"))
+                              for entry in entries
+                              if isinstance(entry, dict)
+                          ]
+                          history_tail = entries[-6:]
+                  except (AssertionError, TimeoutError, urllib.error.URLError):
+                      pass
+              container_log = "unavailable"
+              container_id = current.get("container_id")
+              if container_id:
+                  try:
+                      raw_log = docker._request(
+                          "GET",
+                          f"/containers/{container_id}/logs?stdout=true&stderr=true&tail=80",
+                      )
+                      container_log = str(raw_log)[-5000:]
+                  except DockerError as error:
+                      container_log = f"{type(error).__name__}: {error}"
+              print(
+                  json.dumps(
+                      {
+                          "failure": str(wait_error),
+                          "tenant": {
+                              "status": current.get("status"),
+                              "container_changed": str(current.get("container_id"))
+                              != initial_container_id,
+                              "last_error": current.get("last_error"),
+                          },
+                          "plugins": [
+                              {
+                                  "name": item.get("name"),
+                                  "desired": item.get("desired_version"),
+                                  "observed": item.get("observed_version"),
+                                  "healthy": item.get("last_healthy_version"),
+                                  "status": item.get("status"),
+                                  "last_error": item.get("last_error"),
+                              }
+                              for item in plugin_rows
+                          ],
+                          "operations": [
+                              {
+                                  "action": item["action"],
+                                  "status": item["status"],
+                                  "detail": item["detail"],
+                              }
+                              for item in operations
+                          ],
+                          "session_event_types": history_types,
+                          "session_tail": history_tail,
+                          "container_log_tail": container_log,
+                      },
+                      default=str,
+                      ensure_ascii=False,
+                  ),
+                  flush=True,
+              )
+              raise
           first_plugin = first["plugin"]
           first_tenant = tenant_row()
           first_rebuilt_container_id = str(first_tenant["container_id"])
