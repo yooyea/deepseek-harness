@@ -113,21 +113,9 @@ jobs:
           "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" rm -f /tmp/model-credential.yaml
           "${file_cmd[@]}" rm -f "$credential_copy"
 
-          # docker cp replaces the credential file after DSH has already started.
-          # Restart once so the credential provider reads it deterministically;
-          # this restart is test setup, before the model-generated plugin flow.
-          "${docker_cmd[@]}" restart "deepharness-tenant-${slug}" >/dev/null
-          for attempt in $(seq 1 60); do
-            if "${docker_cmd[@]}" exec "deepharness-tenant-${slug}" node -e \
-              "fetch('http://127.0.0.1:3080/api/default_config.content.json').then(r=>{if(!r.ok)process.exit(1)})"; then
-              break
-            fi
-            if [[ "$attempt" -eq 60 ]]; then
-              echo "Temporary tenant did not become ready after credential restart." >&2
-              exit 1
-            fi
-            sleep 2
-          done
+          # The credentials provider watches this managed file and publishes the
+          # new snapshot without restarting the tenant.
+          sleep 2
 
           "${compose_cmd[@]}" exec -T -e SMOKE_SLUG="$slug" tenant-control-plane python - <<'PY'
           from __future__ import annotations
