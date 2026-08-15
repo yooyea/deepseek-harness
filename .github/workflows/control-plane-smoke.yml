@@ -1,0 +1,363 @@
+name: Control-plane end-to-end smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/control-plane-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_NAME: ${{ secrets.SERVER_NAME }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
+    steps:
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Exercise tenant and plugin lifecycle
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/deepseek-harness"
+          if docker info >/dev/null 2>&1; then
+            compose_cmd=(docker compose)
+          else
+            compose_cmd=(sudo -n docker compose)
+          fi
+          "${compose_cmd[@]}" exec -T tenant-control-plane python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import hashlib
+          import io
+          import json
+          import tarfile
+          import time
+          import urllib.error
+          import urllib.request
+
+          from app.backup import backup_once
+          from app.config import Settings
+          from app.crypto import SecretCipher
+          from app.database import Database
+          from app.object_store import ObjectStore
+
+          settings = Settings.from_env()
+          database = Database(settings.database_url)
+          cipher = SecretCipher(settings.secret_key)
+          store = ObjectStore(
+              settings.oss_endpoint,
+              settings.oss_region,
+              settings.oss_bucket,
+              settings.oss_access_key_id,
+              settings.oss_access_key_secret,
+          )
+          base_url = "http://127.0.0.1:8090"
+          admin = base64.b64encode(
+              f"{settings.admin_user}:{settings.admin_password}".encode()
+          ).decode()
+          slug = f"smoke-{int(time.time())}"
+          plugin_name = "deepharness-smoke-bundle"
+          plugin_version = f"0.0.{int(time.time())}"
+          tenant_id = None
+          checks: list[str] = []
+
+
+          def request(
+              method: str,
+              url: str,
+              payload: object | None = None,
+              *,
+              authorization: str | None = None,
+              headers: dict[str, str] | None = None,
+              expected: tuple[int, ...] = (200,),
+          ) -> tuple[int, object | None]:
+              body = None if payload is None else json.dumps(payload).encode()
+              request_headers = dict(headers or {})
+              if authorization is not None:
+                  request_headers["Authorization"] = authorization
+              if payload is not None:
+                  request_headers["Content-Type"] = "application/json"
+              req = urllib.request.Request(url, data=body, method=method, headers=request_headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      status = response.status
+                      content = response.read()
+                      content_type = response.headers.get("Content-Type", "")
+              except urllib.error.HTTPError as error:
+                  status = error.code
+                  content = error.read()
+                  content_type = error.headers.get("Content-Type", "")
+              if status not in expected:
+                  detail = content.decode(errors="replace")[:500]
+                  raise AssertionError(f"{method} request returned HTTP {status}: {detail}")
+              if not content:
+                  return status, None
+              if "json" in content_type or content[:1] in {b"{", b"["}:
+                  return status, json.loads(content)
+              return status, content
+
+
+          def admin_request(
+              method: str,
+              path: str,
+              payload: object | None = None,
+              expected: tuple[int, ...] = (200,),
+          ) -> tuple[int, object | None]:
+              headers = {"X-Control-Plane-CSRF": "1"} if method not in {"GET", "HEAD"} else {}
+              return request(
+                  method,
+                  base_url + path,
+                  payload,
+                  authorization=f"Basic {admin}",
+                  headers=headers,
+                  expected=expected,
+              )
+
+
+          def runtime_request(
+              token: str,
+              method: str,
+              path: str,
+              payload: object | None = None,
+              expected: tuple[int, ...] = (200,),
+          ) -> tuple[int, object | None]:
+              return request(
+                  method,
+                  base_url + "/api/runtime" + path,
+                  payload,
+                  authorization=f"Bearer {token}",
+                  expected=expected,
+              )
+
+
+          def make_bundle(marker: str) -> tuple[bytes, dict[str, object]]:
+              manifest: dict[str, object] = {
+                  "name": plugin_name,
+                  "version": plugin_version,
+                  "type": "module",
+                  "main": "index.js",
+                  "files": ["index.js", "cordis.patch.yml"],
+                  "dsh": {"bundle": {"patch": "./cordis.patch.yml"}},
+              }
+              files = {
+                  "package/package.json": json.dumps(manifest, separators=(",", ":")).encode(),
+                  "package/index.js": (
+                      "export const name='deepharness-smoke';"
+                      f"export function apply(){{console.log('smoke:{marker}')}}"
+                  ).encode(),
+                  "package/cordis.patch.yml": (
+                      "- insert:\n"
+                      "    - id: deepharness-smoke\n"
+                      f"      name: {plugin_name}\n"
+                  ).encode(),
+              }
+              output = io.BytesIO()
+              with tarfile.open(fileobj=output, mode="w:gz") as archive:
+                  for path, content in files.items():
+                      info = tarfile.TarInfo(path)
+                      info.size = len(content)
+                      info.mtime = 0
+                      info.mode = 0o644
+                      archive.addfile(info, io.BytesIO(content))
+              return output.getvalue(), manifest
+
+
+          def wait_for(predicate, label: str, timeout: int = 120):
+              deadline = time.monotonic() + timeout
+              last_error: Exception | None = None
+              while time.monotonic() < deadline:
+                  try:
+                      value = predicate()
+                      if value:
+                          return value
+                  except (AssertionError, KeyError, StopIteration, TimeoutError, urllib.error.URLError) as error:
+                      last_error = error
+                  time.sleep(2)
+              raise AssertionError(f"timed out waiting for {label}: {last_error}")
+
+
+          try:
+              status, health = request("GET", base_url + "/api/health")
+              assert status == 200 and health == {
+                  "status": "ok",
+                  "docker": True,
+                  "database": True,
+                  "object_store": True,
+              }
+              checks.append("dependency health")
+
+              status, _ = request("GET", base_url + "/api/dashboard", expected=(401,))
+              assert status == 401
+              status, dashboard = admin_request("GET", "/api/dashboard")
+              assert status == 200 and isinstance(dashboard, dict)
+              checks.append("admin authentication and dashboard")
+
+              _, created = admin_request(
+                  "POST",
+                  "/api/tenants",
+                  {"name": "Automated smoke tenant", "slug": slug, "access_username": "smoke-admin"},
+                  expected=(201,),
+              )
+              assert isinstance(created, dict)
+              tenant_id = int(created["id"])
+              host_port = int(created["host_port"])
+              initial_password = str(created["initial_password"])
+              checks.append("tenant creation")
+
+              tenant_auth = base64.b64encode(f"smoke-admin:{initial_password}".encode()).decode()
+              tenant_url = f"http://host.docker.internal:{host_port}/"
+              tenant_headers = {"Host": f"{settings.public_host}:{host_port}"}
+
+              def tenant_ready():
+                  status, _ = request(
+                      "GET",
+                      tenant_url,
+                      authorization=f"Basic {tenant_auth}",
+                      headers=tenant_headers,
+                      expected=(200, 502, 503),
+                  )
+                  return status == 200
+
+              wait_for(tenant_ready, "tenant web readiness")
+              status, _ = request("GET", tenant_url, headers=tenant_headers, expected=(401,))
+              assert status == 401
+              checks.append("tenant web authentication")
+
+              tenant = database.get_tenant(tenant_id)
+              assert tenant is not None
+              runtime_token = cipher.decrypt(tenant["runtime_token_encrypted"])
+              bundle, manifest = make_bundle("healthy")
+              sha256 = hashlib.sha256(bundle).hexdigest()
+              _, upload = runtime_request(
+                  runtime_token,
+                  "POST",
+                  "/plugins/uploads",
+                  {"name": plugin_name, "version": plugin_version, "sha256": sha256},
+              )
+              assert isinstance(upload, dict)
+              upload_request = urllib.request.Request(
+                  str(upload["upload_url"]),
+                  data=bundle,
+                  method="PUT",
+                  headers={str(key): str(value) for key, value in upload["upload_headers"].items()},
+              )
+              with urllib.request.urlopen(upload_request, timeout=30) as response:
+                  assert response.status == 200
+              runtime_request(
+                  runtime_token,
+                  "POST",
+                  "/plugins/register",
+                  {
+                      "name": plugin_name,
+                      "version": plugin_version,
+                      "sha256": sha256,
+                      "artifact_key": upload["artifact_key"],
+                      "source_type": "generated",
+                      "source_ref": "smoke-test",
+                      "manifest": manifest,
+                  },
+              )
+              checks.append("encrypted OSS upload and plugin registration")
+
+              changed_bundle, _ = make_bundle("changed")
+              changed_sha = hashlib.sha256(changed_bundle).hexdigest()
+              _, changed_upload = runtime_request(
+                  runtime_token,
+                  "POST",
+                  "/plugins/uploads",
+                  {"name": plugin_name, "version": plugin_version, "sha256": changed_sha},
+              )
+              assert isinstance(changed_upload, dict)
+              changed_request = urllib.request.Request(
+                  str(changed_upload["upload_url"]),
+                  data=changed_bundle,
+                  method="PUT",
+                  headers={str(key): str(value) for key, value in changed_upload["upload_headers"].items()},
+              )
+              with urllib.request.urlopen(changed_request, timeout=30) as response:
+                  assert response.status == 200
+              runtime_request(
+                  runtime_token,
+                  "POST",
+                  "/plugins/register",
+                  {
+                      "name": plugin_name,
+                      "version": plugin_version,
+                      "sha256": changed_sha,
+                      "artifact_key": changed_upload["artifact_key"],
+                      "source_type": "generated",
+                      "source_ref": "smoke-test-changed",
+                      "manifest": manifest,
+                  },
+                  expected=(409,),
+              )
+              checks.append("immutable plugin version rejection")
+
+              admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "rebuild"})
+
+              def plugin_healthy():
+                  _, current = admin_request("GET", "/api/dashboard")
+                  row = next(item for item in current["tenants"] if int(item["id"]) == tenant_id)
+                  plugin = next((item for item in row["plugins"] if item["name"] == plugin_name), None)
+                  return plugin if plugin and plugin["status"] == "healthy" else None
+
+              healthy = wait_for(plugin_healthy, "plugin restoration and health report", timeout=180)
+              assert healthy["observed_version"] == plugin_version
+              assert healthy["last_healthy_version"] == plugin_version
+              wait_for(tenant_ready, "rebuilt tenant readiness")
+              checks.append("plugin restore, rebuild, and runtime report")
+
+              admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "recover"})
+
+              def safe_mode_ready():
+                  _, current = admin_request("GET", "/api/dashboard")
+                  row = next(item for item in current["tenants"] if int(item["id"]) == tenant_id)
+                  return row if row["safe_mode"] and row["runtime"]["running"] else None
+
+              wait_for(safe_mode_ready, "safe recovery")
+              wait_for(tenant_ready, "safe-mode tenant readiness")
+              checks.append("safe recovery")
+
+              admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "rebuild"})
+              wait_for(plugin_healthy, "last healthy plugin rebuild", timeout=180)
+              admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "stop"})
+              admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "start"})
+              wait_for(tenant_ready, "tenant start")
+              admin_request("POST", f"/api/tenants/{tenant_id}/actions", {"action": "restart"})
+              wait_for(tenant_ready, "tenant restart")
+              checks.append("stop, start, restart, and last-healthy rebuild")
+
+              backup_key = backup_once(database, store)
+              backup_metadata = store.client.head_object(Bucket=store.bucket, Key=backup_key)
+              assert int(backup_metadata["ContentLength"]) > 0
+              checks.append("PostgreSQL logical backup to OSS")
+          finally:
+              if tenant_id is not None:
+                  try:
+                      admin_request("DELETE", f"/api/tenants/{tenant_id}")
+                  except (AssertionError, OSError, urllib.error.URLError) as error:
+                      print(f"cleanup warning: {type(error).__name__}")
+                  with database.connection() as connection:
+                      connection.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
+                  prefix = f"tenants/{slug}/"
+                  listed = store.client.list_objects_v2(Bucket=store.bucket, Prefix=prefix)
+                  for item in listed.get("Contents", []):
+                      store.client.delete_object(Bucket=store.bucket, Key=item["Key"])
+
+          print(json.dumps({"status": "ok", "checks": checks, "cleanup": "complete"}, ensure_ascii=False))
+          PY
+          REMOTE
