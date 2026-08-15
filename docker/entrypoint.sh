@@ -12,6 +12,12 @@ DSH_ACCESS_HASH="$(caddy hash-password --plaintext "$DSH_ACCESS_PASSWORD")"
 
 mkdir -p "$DSH_HOME"
 
+if [[ -n "${DEEPHARNESS_TENANT_TOKEN:-}" && ! -e "$DSH_HOME/AGENTS.md" ]]; then
+  cp /opt/dsh/docker/TENANT_AGENTS.md "$DSH_HOME/AGENTS.md"
+fi
+
+node /opt/dsh/docker/plugin-bootstrap.mjs
+
 dsh_args=(web --host 127.0.0.1 --port 3080)
 if [[ -n "${DSH_TRUSTED_HOST:-}" ]]; then
   dsh_args+=(--trusted-host "$DSH_TRUSTED_HOST")
@@ -23,9 +29,12 @@ dsh_pid=$!
 caddy run --config /opt/dsh/docker/Caddyfile --adapter caddyfile &
 caddy_pid=$!
 
+node /opt/dsh/docker/plugin-report.mjs &
+plugin_report_pid=$!
+
 shutdown() {
-  kill -TERM "$dsh_pid" "$caddy_pid" 2>/dev/null || true
-  wait "$dsh_pid" "$caddy_pid" 2>/dev/null || true
+  kill -TERM "$dsh_pid" "$caddy_pid" "$plugin_report_pid" 2>/dev/null || true
+  wait "$dsh_pid" "$caddy_pid" "$plugin_report_pid" 2>/dev/null || true
 }
 
 trap shutdown INT TERM EXIT

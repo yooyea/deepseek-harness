@@ -2,52 +2,69 @@
 
 English | [中文](README.zh.md)
 
-The tenant control plane provisions one resource-limited Harness container and one persistent Docker volume per tenant. It is independent from the Harness package graph and communicates with Harness only through its published image and environment variables.
+The tenant control plane provisions disposable, resource-limited Harness containers. PostgreSQL is the authority for tenant, credential, plugin, health, and operation state; private Alibaba Cloud OSS stores immutable plugin releases and logical database backups.
 
 ## Capabilities
 
 - HTTP Basic protected administrator dashboard
-- SQLite persistence in WAL mode
-- tenant create, start, stop, restart, and removal operations
-- one-time generated tenant password
-- isolated data volume and host port per tenant
-- host CPU, load, memory, and disk dashboard
-- per-container CPU and memory usage
-- admission checks against actual pressure and reserved resource limits
-- immutable lifecycle operation log
+- PostgreSQL tenant and plugin desired-state records
+- private, encrypted, versioned OSS plugin artifacts
+- tenant create, start, stop, restart, rebuild, recovery, and removal
+- one-time generated tenant password encrypted at rest for reconstruction
+- host and per-container resource monitoring and admission
+- desired, observed, and last-healthy plugin versions
+- tenant-scoped runtime tokens and short-lived artifact URLs
+- daily compressed logical database backups to OSS
 
-Removal preserves the tenant data volume by default. The API supports explicit volume purging, but the dashboard intentionally does not expose that destructive option.
+Tenant containers use an in-memory `/data` filesystem and contain no Alibaba Cloud credential. The image restores desired plugins through the control plane before Harness boots, verifies every SHA-256 digest, installs with package lifecycle scripts disabled, and reports observations only after the Harness HTTP process becomes ready.
+
+`rebuild` deletes and recreates a container from PostgreSQL and OSS. `recover` performs the same replacement with `DSH_PLUGIN_SAFE_MODE=1`, which starts the base image without tenant plugins.
 
 ## Run with Docker Compose
 
-The repository-level `docker-compose.yml` starts both the original Harness instance and the control plane. Copy `.env.example` to `.env`, replace both administrator passwords, then run:
+Copy `.env.example` to `.env`, replace every placeholder, then run:
 
 ```bash
 docker compose up -d
 ```
 
-The default endpoints are:
+The Compose application starts PostgreSQL, the original Harness instance, the tenant control plane, and its backup worker. PostgreSQL is private to the Compose network and uses the `deepharness-postgres-data` volume. Provisioned tenant containers have no durable Docker volume.
+
+Default endpoints:
 
 - Harness: `http://SERVER:8080`
 - Tenant control plane: `http://SERVER:8090`
 - Provisioned tenants: `http://SERVER:8100` through `http://SERVER:8199`
 
-Production firewalls must explicitly allow only the required ports. Put the control plane behind a private network or a TLS reverse proxy before giving access to additional administrators.
+GitHub Actions creates a private OSS bucket when `OSS_BUCKET` is not configured, enables versioning, default AES-256 encryption, incomplete-upload cleanup, and 90-day noncurrent-version expiration, then writes the resolved OSS configuration to the server deployment.
 
-The automated first deployment reuses the existing Harness administrator password for the control plane so the operator can log in immediately. The two values can be separated later in the server-side `.env` file.
+`OSS_ENDPOINT` must use Alibaba Cloud's S3-compatible form, for example `https://s3.oss-cn-shanghai.aliyuncs.com`. The boto3 client uses the OSS-compatible V2 signature mode.
 
-## Security model
+## Plugin artifact protocol
 
-Mounting `/var/run/docker.sock` grants the control-plane process host-level container management power. The service therefore accepts only a fixed Harness image, allocates ports from a configured range, generates container and volume names from validated slugs, and refuses lifecycle actions against containers without its management label.
+A tenant runtime requests an upload URL, uploads one npm package tarball, and commits its metadata. The control plane accepts the commit only when the key belongs to that tenant and the downloaded artifact matches the declared SHA-256 digest. PostgreSQL then records the version as desired.
 
-The control plane does not persist tenant plaintext passwords. A generated password is returned once after successful creation; Docker retains it in the managed container configuration so that the Harness entry point can enforce Basic Auth.
+On container replacement, the image requests desired releases with its tenant bearer token, downloads each short-lived URL, verifies the digest again, and runs the profile plugin installer with `--ignore-scripts` and an exact file reference. One failed plugin is reported and skipped; it cannot prevent the base Harness process from starting.
+
+Managed tenants also provide `deepharness-plugin-publish`. A model or developer can turn generated code into an installable DSH bundle, assign a new package version, then run `deepharness-plugin-publish /path/to/plugin --rebuild`. The command packs it, uploads it without exposing cloud credentials, commits its desired state, and schedules replacement only after persistence succeeds. The injected workspace `AGENTS.md` teaches this workflow and warns against restarting the disposable container directly.
+
+Process-local `cordis_define` packages remain temporary by upstream design. To survive replacement and appear in the control-plane inventory, convert the result into a prebuilt installable bundle and publish it with the command above.
+
+## Security
+
+The Docker socket grants the control plane host-level container authority, so the service must remain an authenticated administrative component. Docker operations accept only the configured image, port range, generated names, and management-labelled containers.
+
+Alibaba Cloud access keys are available only to the control-plane and backup containers. Use a dedicated RAM identity restricted to the single OSS bucket. Tenant passwords and runtime tokens are encrypted with `CONTROL_PLANE_SECRET_KEY`; only runtime-token hashes participate in authentication lookups.
+
+PostgreSQL's volume protects database restarts, while OSS backups protect recovery from loss of the Docker host. Restore automation is intentionally separate from ordinary deployment so a broken or partial backup cannot overwrite a live database.
 
 ## Validation
 
-Pure domain and SQLite tests use the Python standard library:
-
 ```bash
 cd tenant-control-plane
+python -m pip install -r requirements.txt
 PYTHONPATH=. python -m unittest discover -s tests -v
-python -m compileall -q app tests
+python -m compileall -q app tests scripts
+node --check ../docker/plugin-bootstrap.mjs
+node --check ../docker/plugin-report.mjs
 ```

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 
 def _required(name: str) -> str:
@@ -17,7 +17,7 @@ def _required(name: str) -> str:
 class Settings:
     """Validated process configuration."""
 
-    database_path: str
+    database_url: str
     docker_socket: str
     admin_user: str
     admin_password: str
@@ -33,12 +33,19 @@ class Settings:
     minimum_free_memory_mb: int
     minimum_free_disk_percent: float
     tenant_cpu_reservation_ratio: float
+    secret_key: str
+    runtime_base_url: str
+    oss_endpoint: str
+    oss_region: str
+    oss_bucket: str
+    oss_access_key_id: str
+    oss_access_key_secret: str
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         """Load configuration from environment variables."""
         settings = cls(
-            database_path=os.environ.get("CONTROL_PLANE_DB", "/data/control-plane.db"),
+            database_url=_required("DATABASE_URL"),
             docker_socket=os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock"),
             admin_user=os.environ.get("CONTROL_PLANE_ADMIN_USER", "admin").strip(),
             admin_password=_required("CONTROL_PLANE_ADMIN_PASSWORD"),
@@ -57,6 +64,13 @@ class Settings:
             minimum_free_memory_mb=int(os.environ.get("CAPACITY_MIN_FREE_MEMORY_MB", "2048")),
             minimum_free_disk_percent=float(os.environ.get("CAPACITY_MIN_FREE_DISK_PERCENT", "15")),
             tenant_cpu_reservation_ratio=float(os.environ.get("CAPACITY_CPU_RESERVATION_RATIO", "0.8")),
+            secret_key=_required("CONTROL_PLANE_SECRET_KEY"),
+            runtime_base_url=_required("CONTROL_PLANE_RUNTIME_URL").rstrip("/"),
+            oss_endpoint=_required("OSS_ENDPOINT").rstrip("/"),
+            oss_region=os.environ.get("OSS_REGION", "cn-shanghai").strip(),
+            oss_bucket=_required("OSS_BUCKET"),
+            oss_access_key_id=_required("ALIYUN_ID"),
+            oss_access_key_secret=_required("ALIYUN_SECRET"),
         )
         if not settings.admin_user:
             raise RuntimeError("CONTROL_PLANE_ADMIN_USER must not be empty")

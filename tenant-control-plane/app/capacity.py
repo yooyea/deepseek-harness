@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import os
 import shutil
 import threading
-import time
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from .config import Settings

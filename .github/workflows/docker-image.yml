@@ -84,12 +84,40 @@ jobs:
       SERVER_NAME: ${{ secrets.SERVER_NAME }}
       SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
       REGISTRY_PASSWORD: ${{ secrets.DOCKER_PWD }}
+      ALIYUN_ID: ${{ secrets.ALIYUN_ID }}
+      ALIYUN_SECRET: ${{ secrets.ALIYUN_SECRET }}
+      OSS_BUCKET_INPUT: ${{ secrets.OSS_BUCKET }}
+      OSS_REGION: ${{ secrets.OSS_REGION || 'cn-shanghai' }}
+      OSS_ENDPOINT_INPUT: ${{ secrets.OSS_ENDPOINT }}
     steps:
       - name: Check out deployment files
         uses: actions/checkout@v4
 
       - name: Install SSH password client
-        run: sudo apt-get update && sudo apt-get install -y sshpass
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+          python -m pip install --disable-pip-version-check boto3==1.39.14
+
+      - name: Provision private OSS storage
+        env:
+          OSS_BUCKET: ${{ env.OSS_BUCKET_INPUT }}
+          OSS_ENDPOINT: ${{ env.OSS_ENDPOINT_INPUT }}
+        run: python tenant-control-plane/scripts/provision_oss.py
+
+      - name: Prepare deployment secrets
+        run: |
+          umask 077
+          python - <<'PY'
+          import os
+          keys = ("ALIYUN_ID", "ALIYUN_SECRET", "OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")
+          with open(".deploy-secrets.env", "w", encoding="utf-8") as output:
+              for key in keys:
+                  value = os.environ[key]
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit(f"{key} contains a newline")
+                  output.write(f"{key}={value}\n")
+          PY
 
       - name: Prepare deployment directory
         env:
@@ -104,6 +132,8 @@ jobs:
         run: |
           sshpass -e scp -o StrictHostKeyChecking=accept-new docker-compose.yml \
             "$SERVER_NAME@$SERVER_IP:deepseek-harness/docker-compose.yml"
+          sshpass -e scp -o StrictHostKeyChecking=accept-new .deploy-secrets.env \
+            "$SERVER_NAME@$SERVER_IP:deepseek-harness/.deploy-secrets.env"
 
       - name: Log server in to the image registry
         env:
@@ -152,6 +182,8 @@ jobs:
               echo 'CONTROL_PLANE_IMAGE_TAG=control-plane-latest'
               echo 'CONTROL_PLANE_ADMIN_USER=admin'
               printf 'CONTROL_PLANE_ADMIN_PASSWORD=%s\n' "$control_plane_password"
+              printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)"
+              printf 'CONTROL_PLANE_SECRET_KEY=%s\n' "$(openssl rand -base64 32 | tr '+/' '-_')"
               printf 'CONTROL_PLANE_PUBLIC_HOST=%s\n' "$trusted_host"
               echo 'TENANT_PUBLIC_SCHEME=http'
               echo 'TENANT_PORT_START=8100'
@@ -187,15 +219,43 @@ jobs:
                 echo 'TENANT_PORT_END=8199'
               } >> .env
             fi
+            if ! grep -q '^POSTGRES_PASSWORD=' .env; then
+              printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
+            fi
+            if ! grep -q '^CONTROL_PLANE_SECRET_KEY=' .env; then
+              printf 'CONTROL_PLANE_SECRET_KEY=%s\n' "$(openssl rand -base64 32 | tr '+/' '-_')" >> .env
+            fi
           fi
 
+          secret_keys='^(ALIYUN_ID|ALIYUN_SECRET|OSS_BUCKET|OSS_ENDPOINT|OSS_REGION)='
+          grep -Ev "$secret_keys" .env > .env.next
+          cat .deploy-secrets.env >> .env.next
+          mv .env.next .env
+          rm -f .deploy-secrets.env
+
           if docker info >/dev/null 2>&1; then
-            docker compose pull harness tenant-control-plane
+            docker compose pull harness postgres tenant-control-plane control-plane-backup
             docker compose up -d --remove-orphans
             docker compose ps
+            compose_cmd=(docker compose)
           else
-            sudo -n docker compose pull harness tenant-control-plane
+            sudo -n docker compose pull harness postgres tenant-control-plane control-plane-backup
             sudo -n docker compose up -d --remove-orphans
             sudo -n docker compose ps
+            compose_cmd=(sudo -n docker compose)
           fi
+
+          for attempt in {1..30}; do
+            health="$(${compose_cmd[@]} exec -T tenant-control-plane python -c \
+              "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=3).read().decode())" \
+              2>/dev/null || true)"
+            if [[ "$health" == *'"status":"ok"'* ]]; then
+              printf '%s\n' "$health"
+              exit 0
+            fi
+            sleep 2
+          done
+          ${compose_cmd[@]} logs --tail=100 postgres tenant-control-plane control-plane-backup
+          echo 'Control-plane dependencies did not become healthy.' >&2
+          exit 1
           REMOTE
