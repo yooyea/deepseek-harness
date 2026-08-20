@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { ConversationNodeAssembler } from '../src/client/sessions/conversation-assembler.ts'
 import type {
-  ConversationEventInput, ConversationMatch, ConversationNodeContext,
+  ConversationEventInput, ConversationLocationData, ConversationMatch, ConversationNodeContext,
   ConversationNodeDefinition, ConversationViewDefinition, ConversationViewNode,
 } from '../src/client/contract/conversation.ts'
 
@@ -21,6 +21,7 @@ declare module '../src/client/contract/conversation.ts' {
 
   interface ConversationTurnDataMap {
     'scope-probe': ScopeProbeTurnData
+    'file-preview': { readonly path: string }
   }
 }
 
@@ -673,6 +674,41 @@ describe('ConversationNodeAssembler', () => {
 
     expect([...chatSnapshot(assembler)?.nodes.values() ?? []][0]?.data)
       .toEqual({ step: 2, turn: 2 })
+  })
+
+  it('canonicalizes a legacy Location data alias to its owning Definition kind', () => {
+    const definition: ConversationNodeDefinition<null> = {
+      kind: 'file-preview',
+      match: event => event.type === 'turn/start'
+        ? { id: String(event.data.turn), role: 'start' }
+        : null,
+      start: () => null,
+      update: context => context.state,
+      buildLocationData: (_context, scope) => scope === 'turn'
+        ? {
+            kind: 'turn',
+            turn: 1,
+            key: 'filePreview',
+            value: { path: '/workspace/result.txt' },
+          } as unknown as ConversationLocationData
+        : null,
+      target: 'chat',
+      buildViewNode: context => node(
+        context,
+        context.start?.location.kind === 'turn'
+          ? context.start.location.turn.data.get('file-preview')?.path
+          : undefined,
+      ),
+    }
+    const assembler = new ConversationNodeAssembler(
+      new TestEventDefinitions([definition]),
+      new TestViewDefinitions([testView()]),
+    )
+
+    assembler.replaceWindow([input(at(1, 'turn/start', { turn: 1 }))], false)
+    expect(() => assembler.flush()).not.toThrow()
+    expect([...chatSnapshot(assembler)?.nodes.values() ?? []][0]?.data)
+      .toBe('/workspace/result.txt')
   })
 
   it('updates existing turn Locations when their Step membership changes', () => {
