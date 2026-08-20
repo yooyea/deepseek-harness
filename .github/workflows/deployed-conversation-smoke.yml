@@ -42,7 +42,7 @@ jobs:
           compose=(docker compose)
           if ! docker info >/dev/null 2>&1; then compose=(sudo -n docker compose); fi
           if "${compose[@]}" exec -T harness sh -lc \
-            "grep -R -F 'published Location data key' /opt/dsh/apps/web/dist >/dev/null"; then
+            "grep -R -F 'published Location data key' /opt/dsh/apps/web/dist >/dev/null" </dev/null; then
             echo 'deployed browser bundle still contains the fatal legacy-key assertion' >&2
             exit 1
           fi
