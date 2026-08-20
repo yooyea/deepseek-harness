@@ -55,6 +55,8 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          build-args: |
+            DSH_CLIENT_COMMIT_HASH=${{ github.sha }}
           tags: |
             crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:latest
             crpi-nwybe4ublujm62d9.cn-hongkong.personal.cr.aliyuncs.com/linehalo/harness:sha-${{ github.sha }}
