@@ -39,6 +39,15 @@ jobs:
           test -n "$access_user"
           test -n "$access_password"
 
+          compose=(docker compose)
+          if ! docker info >/dev/null 2>&1; then compose=(sudo -n docker compose); fi
+          if "${compose[@]}" exec -T harness sh -lc \
+            "grep -R -F 'published Location data key' /opt/dsh/apps/web/dist >/dev/null"; then
+            echo 'deployed browser bundle still contains the fatal legacy-key assertion' >&2
+            exit 1
+          fi
+          echo 'deployed browser bundle contains the compatibility fix'
+
           python3 - "$access_user" "$access_password" <<'PY'
           import base64
           import json
@@ -142,13 +151,4 @@ jobs:
               time.sleep(3)
           raise AssertionError("assistant marker was not observed before timeout")
           PY
-
-          compose=(docker compose)
-          if ! docker info >/dev/null 2>&1; then compose=(sudo -n docker compose); fi
-          if "${compose[@]}" exec -T harness sh -lc \
-            "grep -R -F 'published Location data key' /opt/dsh/apps/web/dist >/dev/null"; then
-            echo 'deployed browser bundle still contains the fatal legacy-key assertion' >&2
-            exit 1
-          fi
-          echo 'deployed browser bundle contains the compatibility fix'
           REMOTE
