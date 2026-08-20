@@ -304,14 +304,10 @@ jobs:
           assert isinstance(models, dict) and models.get("routable") is True
           checks.append("tenant model route is configured and routable")
           permission = rpc(
-              "session.prompt",
-              {
-                  "sessionId": session_id,
-                  "mode": "queue",
-                  "content": [{"type": "text", "text": "/permission danger-full-access"}],
-              },
+              "commands/execute",
+              {"args": {"agentId": session_id, "line": "/permission danger-full-access"}},
           )
-          assert isinstance(permission, dict) and permission.get("command", {}).get("kind") == "success"
+          assert isinstance(permission, dict) and permission.get("commandId"), permission
           checks.append("tenant explicitly enabled non-interactive full access for plugin authoring")
           prompt = f"""
           Work directly in the terminal and complete this task; do not merely explain it.
