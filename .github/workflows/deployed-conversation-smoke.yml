@@ -1,0 +1,154 @@
+name: Deployed conversation smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/deployed-conversation-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  conversation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_NAME: ${{ secrets.SERVER_NAME }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PWD }}
+    steps:
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Exercise the deployed UI and a real model turn
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SERVER_NAME@$SERVER_IP" \
+            'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/deepseek-harness"
+
+          access_user="$(sed -n 's/^DSH_ACCESS_USER=//p' .env | head -1)"
+          access_password="$(sed -n 's/^DSH_ACCESS_PASSWORD=//p' .env | head -1)"
+          test -n "$access_user"
+          test -n "$access_password"
+
+          python3 - "$access_user" "$access_password" <<'PY'
+          import base64
+          import json
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          user, password = sys.argv[1:]
+          origin = "http://127.0.0.1:8080"
+          authorization = "Basic " + base64.b64encode(
+              f"{user}:{password}".encode()
+          ).decode()
+
+
+          def request(path: str, body: object | None = None) -> object:
+              data = None if body is None else json.dumps(body).encode()
+              headers = {"Authorization": authorization}
+              if data is not None:
+                  headers["Content-Type"] = "application/json"
+              with urllib.request.urlopen(
+                  urllib.request.Request(origin + path, data=data, headers=headers),
+                  timeout=20,
+              ) as response:
+                  raw = response.read()
+                  if response.status != 200:
+                      raise AssertionError(f"{path} returned HTTP {response.status}")
+                  return raw.decode() if body is None else json.loads(raw)
+
+
+          def rpc(method: str, payload: object) -> object:
+              envelope = request(
+                  f"/api/{method}",
+                  {
+                      "type": "client-request",
+                      "rpcId": f"deployed-smoke-{method}-{time.time_ns()}",
+                      "method": method,
+                      "payload": payload,
+                  },
+              )
+              assert isinstance(envelope, dict)
+              result = envelope.get("result")
+              assert isinstance(result, dict), envelope
+              if not result.get("ok"):
+                  error = result.get("error", {})
+                  raise AssertionError(
+                      f"{method} failed: {error.get('code')}: {error.get('message')}"
+                  )
+              return result.get("value")
+
+
+          html = request("/")
+          assert isinstance(html, str) and "<html" in html.lower()
+
+          credentials = rpc("credentials.describe", {"refs": ["DEEPSEEK_API_KEY"]})
+          assert (
+              isinstance(credentials, dict)
+              and isinstance(credentials.get("credentials"), dict)
+              and credentials["credentials"].get("DEEPSEEK_API_KEY", {}).get("configured") is True
+          ), "deployed DeepSeek credential is not configured"
+
+          created = rpc("session.create", {"cwd": "/data", "agentPreset": "standard"})
+          assert isinstance(created, dict)
+          session_id = str(created["sessionId"])
+          models = rpc("session.models", {"sessionId": session_id})
+          assert isinstance(models, dict) and models.get("routable") is True, models
+
+          marker = f"DEEPHARNESS_CHAT_OK_{int(time.time())}"
+          accepted = rpc(
+              "session.prompt",
+              {
+                  "sessionId": session_id,
+                  "mode": "queue",
+                  "content": [
+                      {
+                          "type": "text",
+                          "text": f"只回复 {marker}，不要解释，也不要调用工具。",
+                      }
+                  ],
+              },
+          )
+          assert isinstance(accepted, dict) and accepted.get("accepted") is True
+
+          deadline = time.monotonic() + 180
+          assistant_text = ""
+          while time.monotonic() < deadline:
+              history = rpc("session.history", {"sessionId": session_id, "maxMessages": 20})
+              assert isinstance(history, dict)
+              for entry in history.get("events", []):
+                  event = entry.get("event", {}) if isinstance(entry, dict) else {}
+                  if event.get("type") != "assistant/message":
+                      continue
+                  message = event.get("data", {}).get("message", {})
+                  for block in message.get("content", []):
+                      if isinstance(block, dict) and block.get("type") == "text":
+                          assistant_text += str(block.get("text", ""))
+              if marker in assistant_text:
+                  print("deployed page, credential, model route, and assistant response: ok")
+                  print(f"session id: {session_id}")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise AssertionError("assistant marker was not observed before timeout")
+          PY
+
+          compose=(docker compose)
+          if ! docker info >/dev/null 2>&1; then compose=(sudo -n docker compose); fi
+          if "${compose[@]}" exec -T harness sh -lc \
+            "grep -R -F 'published Location data key' /opt/dsh/apps/web/dist >/dev/null"; then
+            echo 'deployed browser bundle still contains the fatal legacy-key assertion' >&2
+            exit 1
+          fi
+          echo 'deployed browser bundle contains the compatibility fix'
+          REMOTE
