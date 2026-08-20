@@ -1,5 +1,7 @@
 FROM node:24-bookworm AS builder
 
+ARG DSH_CLIENT_COMMIT_HASH
+
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 
