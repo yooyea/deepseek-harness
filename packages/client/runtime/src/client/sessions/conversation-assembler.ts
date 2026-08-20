@@ -729,18 +729,20 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
         `conversation Definition "${context.kind}" published ${data.kind} data through its ${scope} scope`,
       )
     }
-    if (data.key !== context.kind) {
-      throw new Error(
-        `conversation Definition "${context.kind}" published Location data key "${data.key}"; expected its owned kind`,
-      )
-    }
+    // The key is ownership metadata, so the engine is the authority for it.
+    // Older and third-party Definitions may still publish a legacy alias here
+    // (for example `filePreview` for a `file-preview` Definition). Letting that
+    // redundant field throw during flush takes down every conversation view.
+    // Canonicalize it at the plugin boundary while preserving validation of the
+    // actual Location coordinates below.
+    const ownedData = data.key === context.kind ? data : { ...data, key: context.kind }
     if (!Number.isSafeInteger(data.turn) || data.turn < 0) {
       throw new Error(`conversation Definition "${context.kind}" published invalid turn ${data.turn}`)
     }
     if (data.kind === 'step' && (!Number.isSafeInteger(data.step) || (data.step as number) < 0)) {
       throw new Error(`conversation Definition "${context.kind}" published invalid step ${String(data.step)}`)
     }
-    return data
+    return ownedData
   }
 
   private replaceLocationData(): void {
