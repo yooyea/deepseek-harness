@@ -152,3 +152,99 @@ jobs:
           raise AssertionError("assistant marker was not observed before timeout")
           PY
           REMOTE
+
+      - name: Exercise a real Chromium conversation
+        env:
+          SSHPASS: ${{ env.SERVER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/deepharness-browser-smoke"
+          mkdir -p "$smoke_root"
+          npm install --prefix "$smoke_root" --ignore-scripts --no-audit --no-fund \
+            playwright-core@1.61.1
+
+          access_user="$(sshpass -e ssh -o StrictHostKeyChecking=accept-new \
+            "$SERVER_NAME@$SERVER_IP" \
+            "sed -n 's/^DSH_ACCESS_USER=//p' \"\$HOME/deepseek-harness/.env\" | head -1")"
+          access_password="$(sshpass -e ssh -o StrictHostKeyChecking=accept-new \
+            "$SERVER_NAME@$SERVER_IP" \
+            "sed -n 's/^DSH_ACCESS_PASSWORD=//p' \"\$HOME/deepseek-harness/.env\" | head -1")"
+          test -n "$access_user"
+          test -n "$access_password"
+
+          cat > "$smoke_root/smoke.cjs" <<'NODE'
+          const { chromium } = require('playwright-core')
+
+          const fatalFragments = [
+            'conversation Definition "file-preview"',
+            'published Location data key "filePreview"',
+            'expected its owned kind',
+          ]
+          async function main() {
+            const pageErrors = []
+            const consoleErrors = []
+            const browser = await chromium.launch({
+              executablePath: '/usr/bin/google-chrome',
+              headless: true,
+              args: ['--no-sandbox'],
+            })
+
+            try {
+            const context = await browser.newContext({
+              httpCredentials: {
+                username: process.env.DSH_ACCESS_USER,
+                password: process.env.DSH_ACCESS_PASSWORD,
+              },
+              locale: 'zh-CN',
+              viewport: { width: 1440, height: 960 },
+            })
+            const page = await context.newPage()
+            page.on('pageerror', error => pageErrors.push(String(error)))
+            page.on('console', message => {
+              if (message.type() === 'error') consoleErrors.push(message.text())
+            })
+
+            await page.goto(`http://${process.env.SERVER_IP}:8080/`, {
+              waitUntil: 'load',
+              timeout: 30_000,
+            })
+            await page.locator('#root').waitFor({ state: 'visible', timeout: 30_000 })
+
+            for (const label of ['继续', 'Continue']) {
+              const button = page.getByRole('button', { name: label, exact: true })
+              if (await button.isVisible().catch(() => false)) await button.click()
+            }
+
+            const input = page.locator('textarea:enabled').last()
+            await input.waitFor({ state: 'visible', timeout: 30_000 })
+            const marker = `DEEPHARNESS_BROWSER_OK_${Date.now()}`
+            await input.fill(`只回复 ${marker}，不要解释，也不要调用工具。`)
+            await input.press('Enter')
+
+            await page.waitForFunction(expected => {
+              const text = document.body.innerText
+              return text.split(expected).length - 1 >= 2
+            }, marker, { timeout: 180_000 })
+
+            const fatalErrors = [...pageErrors, ...consoleErrors]
+              .filter(line => fatalFragments.some(fragment => line.includes(fragment)))
+            if (fatalErrors.length > 0) {
+              throw new Error(`legacy file-preview failure reached Chromium: ${fatalErrors.join('\n')}`)
+            }
+            console.log('real Chromium page load, composer send, assistant render, and console: ok')
+            console.log(`assistant marker: ${marker}`)
+            } finally {
+              await browser.close()
+            }
+          }
+
+          main().catch(error => {
+            console.error(error)
+            process.exitCode = 1
+          })
+          NODE
+
+          DSH_ACCESS_USER="$access_user" \
+          DSH_ACCESS_PASSWORD="$access_password" \
+          SERVER_IP="$SERVER_IP" \
+            node "$smoke_root/smoke.cjs"
